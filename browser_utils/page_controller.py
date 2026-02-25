@@ -152,11 +152,8 @@ class PageController(
                     check_client_disconnected, "After Input Visible"
                 )
 
-                # Fill textarea using centralized logic (inherited from InputController if possible, or direct)
-                await textarea.evaluate(
-                    "(el, t) => { el.value = t; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }",
-                    prompt,
-                )
+                # Use Playwright-native fill so Angular/React/Vue input handlers receive proper events.
+                await textarea.fill(prompt)
                 await self._check_disconnect(
                     check_client_disconnected, "After Input Fill"
                 )

@@ -23,6 +23,7 @@ INPUT_SELECTOR2 = PROMPT_TEXTAREA_SELECTOR
 # Submit button: prioritize primary submit button in prompt area
 SUBMIT_BUTTON_SELECTOR = (
     # Current UI structure
+    "button.ctrl-enter-submits, "
     'ms-run-button button[type="submit"].ms-button-primary, '
     'ms-run-button button[type="submit"], '
     # Legacy selectors
@@ -296,3 +297,4 @@ FUNCTION_DECLARATIONS_CLOSE_BUTTON_SELECTOR = (
     'mat-dialog-container button:has-text("Cancel"), '
     'mat-mdc-dialog-container button:has-text("Cancel")'
 )
+
