@@ -252,6 +252,59 @@ async def test_init_headless_auth_exists(
 
 
 @pytest.mark.asyncio
+async def test_init_headless_keeps_active_auth_when_auto_rotation_enabled(
+    mock_browser, mock_browser_context, mock_page, mock_expect, mock_server_state
+):
+    """Auto-rotation should not override an already valid ACTIVE_AUTH_JSON_PATH."""
+
+    def _exists_side_effect(path):
+        return path in {
+            "/env/auth.json",
+            "/env/rotated.json",
+        }
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LAUNCH_MODE": "headless",
+                "ACTIVE_AUTH_JSON_PATH": "/env/auth.json",
+                "AUTO_AUTH_ROTATION_ON_STARTUP": "true",
+            },
+        ),
+        patch("os.path.exists", side_effect=_exists_side_effect),
+        patch(
+            "browser_utils.auth_rotation._get_next_profile", return_value="/env/rotated.json"
+        ) as mock_get_next_profile,
+        patch(
+            "browser_utils.auth_rotation.check_profile_cookie_health",
+            return_value={"health_status": "healthy"},
+        ) as mock_check_cookie_health,
+        patch(
+            "browser_utils.initialization.core.setup_network_interception_and_scripts",
+            new_callable=AsyncMock,
+        ),
+        patch("browser_utils.initialization.core.setup_debug_listeners"),
+    ):
+        mock_browser_context.pages = []
+        mock_browser_context.new_page.return_value = mock_page
+        mock_page.url = "https://aistudio.google.com/prompts/new_chat"
+        mock_page.locator.return_value.first.inner_text = AsyncMock(
+            return_value="Model"
+        )
+
+        await _initialize_page_logic(mock_browser)
+
+        # Keep the original valid path, do not rotate
+        call_args = mock_browser.new_context.call_args
+        assert call_args[1]["storage_state"] == "/env/auth.json"
+        assert os.environ["ACTIVE_AUTH_JSON_PATH"] == "/env/auth.json"
+
+        mock_get_next_profile.assert_not_called()
+        mock_check_cookie_health.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_init_headless_auth_invalid(mock_browser):
     with (
         patch.dict(

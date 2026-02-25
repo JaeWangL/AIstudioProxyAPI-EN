@@ -76,45 +76,56 @@ async def initialize_page_logic(  # pragma: no cover
         # Fall back to existing environment variable logic
         if launch_mode == "headless" or launch_mode == "virtual_headless":
             # Check for Auto-Auth Rotation on Startup
-            if (
+            auto_rotation_enabled = (
                 os.environ.get("AUTO_AUTH_ROTATION_ON_STARTUP", "false").lower()
                 == "true"
-            ):
-                logger.info(
-                    "   🤖 Auto-Auth Rotation on Startup is ENABLED. Selecting profile..."
-                )
-                try:
-                    # Local import to avoid circular dependencies
-                    from browser_utils.auth_rotation import (
-                        _get_next_profile,
-                        check_profile_cookie_health,
+            )
+            existing_auth_path = os.environ.get("ACTIVE_AUTH_JSON_PATH")
+            existing_auth_is_valid = bool(
+                existing_auth_path and os.path.exists(existing_auth_path)
+            )
+
+            if auto_rotation_enabled:
+                if existing_auth_is_valid:
+                    logger.info(
+                        "   🤖 Auto-Auth Rotation on Startup is ENABLED, but ACTIVE_AUTH_JSON_PATH is already valid. Keeping current profile."
                     )
-
-                    next_profile = _get_next_profile()
-                    if next_profile:
-                        os.environ["ACTIVE_AUTH_JSON_PATH"] = next_profile
-                        logger.info(f"   ✅ Auto-selected profile: {next_profile}")
-
-                        # Check cookie health of selected profile
-                        health = check_profile_cookie_health(next_profile)
-                        if health["health_status"] == "critical":
-                            logger.warning(
-                                "   ⚠️ Selected profile has expired authentication cookies. "
-                                "Consider refreshing by logging in again in debug mode."
-                            )
-                    else:
-                        logger.warning(
-                            "   ⚠️ Auto-Auth Rotation: No available profiles found. Continuing with environment defaults."
+                else:
+                    logger.info(
+                        "   🤖 Auto-Auth Rotation on Startup is ENABLED. Selecting profile..."
+                    )
+                    try:
+                        # Local import to avoid circular dependencies
+                        from browser_utils.auth_rotation import (
+                            _get_next_profile,
+                            check_profile_cookie_health,
                         )
-                except ImportError:
-                    logger.error(
-                        "   ❌ Auto-Auth Rotation failed: Could not import auth_rotation module."
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"   ❌ Error during Auto-Auth Rotation on Startup: {e}",
-                        exc_info=True,
-                    )
+
+                        next_profile = _get_next_profile()
+                        if next_profile:
+                            os.environ["ACTIVE_AUTH_JSON_PATH"] = next_profile
+                            logger.info(f"   ✅ Auto-selected profile: {next_profile}")
+
+                            # Check cookie health of selected profile
+                            health = check_profile_cookie_health(next_profile)
+                            if health["health_status"] == "critical":
+                                logger.warning(
+                                    "   ⚠️ Selected profile has expired authentication cookies. "
+                                    "Consider refreshing by logging in again in debug mode."
+                                )
+                        else:
+                            logger.warning(
+                                "   ⚠️ Auto-Auth Rotation: No available profiles found. Continuing with environment defaults."
+                            )
+                    except ImportError:
+                        logger.error(
+                            "   ❌ Auto-Auth Rotation failed: Could not import auth_rotation module."
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"   ❌ Error during Auto-Auth Rotation on Startup: {e}",
+                            exc_info=True,
+                        )
 
             auth_filename = os.environ.get("ACTIVE_AUTH_JSON_PATH")
             logger.info(
