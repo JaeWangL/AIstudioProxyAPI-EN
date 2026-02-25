@@ -83,13 +83,20 @@ install_poetry() {
 # 克隆项目
 clone_project() {
     log_info "克隆项目..."
-    
-    if [ -d "AIstudioProxyAPI" ]; then
-        log_warning "项目目录已存在，跳过克隆"
-        cd AIstudioProxyAPI
+
+    local repo_url="https://github.com/MasuRii/AIstudioProxyAPI-EN.git"
+    local preferred_dir="AIstudioProxyAPI-EN"
+    local legacy_dir="AIstudioProxyAPI"
+
+    if [ -d "$preferred_dir" ]; then
+        log_warning "检测到项目目录 '$preferred_dir'，跳过克隆"
+        cd "$preferred_dir"
+    elif [ -d "$legacy_dir" ]; then
+        log_warning "检测到旧目录 '$legacy_dir'，将继续使用该目录"
+        cd "$legacy_dir"
     else
-        git clone https://github.com/CJackHwang/AIstudioProxyAPI.git
-        cd AIstudioProxyAPI
+        git clone "$repo_url" "$preferred_dir"
+        cd "$preferred_dir"
         log_success "项目克隆成功 ✓"
     fi
 }
@@ -154,16 +161,15 @@ show_next_steps() {
     log_success "🎉 安装完成！"
     echo
     echo "后续步骤："
-    echo "1. 进入项目目录: cd AIstudioProxyAPI"
+    echo "1. 进入项目目录: cd AIstudioProxyAPI-EN"
     echo "2. 激活虚拟环境: poetry env activate"
     echo "3. 配置环境变量: nano .env"
-    echo "4. 首次认证设置: python launch_camoufox.py --debug"
-    echo "5. 日常运行: python launch_camoufox.py --headless"
+    echo "4. 首次认证设置: poetry run python launch_camoufox.py --debug --auto-save-auth"
+    echo "5. 日常运行: poetry run python launch_camoufox.py --headless"
     echo
     echo "详细文档："
-    echo "- 环境配置: docs/environment-configuration.md"
-    echo "- 认证设置: docs/authentication-setup.md"
-    echo "- 日常使用: docs/daily-usage.md"
+    echo "- 项目说明: README.md"
+    echo "- Docker 部署: docker/README.md"
     echo
 }
 

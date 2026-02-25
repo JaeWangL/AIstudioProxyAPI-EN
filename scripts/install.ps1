@@ -119,15 +119,23 @@ function Install-Poetry {
 # 克隆项目
 function Clone-Project {
     Log-Info "克隆项目..."
-    
-    if (Test-Path "AIstudioProxyAPI") {
-        Log-Warning "项目目录已存在，跳过克隆"
-        Set-Location "AIstudioProxyAPI"
+
+    $repoUrl = "https://github.com/MasuRii/AIstudioProxyAPI-EN.git"
+    $preferredDir = "AIstudioProxyAPI-EN"
+    $legacyDir = "AIstudioProxyAPI"
+
+    if (Test-Path $preferredDir) {
+        Log-Warning "检测到项目目录 '$preferredDir'，跳过克隆"
+        Set-Location $preferredDir
+    }
+    elseif (Test-Path $legacyDir) {
+        Log-Warning "检测到旧目录 '$legacyDir'，将继续使用该目录"
+        Set-Location $legacyDir
     }
     else {
         try {
-            git clone https://github.com/CJackHwang/AIstudioProxyAPI.git
-            Set-Location "AIstudioProxyAPI"
+            git clone $repoUrl $preferredDir
+            Set-Location $preferredDir
             Log-Success "项目克隆成功 ✓"
         }
         catch {
@@ -212,16 +220,15 @@ function Show-NextSteps {
     Log-Success "🎉 安装完成！"
     Write-Host ""
     Write-Host "后续步骤："
-    Write-Host "1. 进入项目目录: cd AIstudioProxyAPI"
+    Write-Host "1. 进入项目目录: cd AIstudioProxyAPI-EN"
     Write-Host "2. 激活虚拟环境: poetry env activate"
     Write-Host "3. 配置环境变量: notepad .env"
-    Write-Host "4. 首次认证设置: poetry run python launch_camoufox.py --debug"
+    Write-Host "4. 首次认证设置: poetry run python launch_camoufox.py --debug --auto-save-auth"
     Write-Host "5. 日常运行: poetry run python launch_camoufox.py --headless"
     Write-Host ""
     Write-Host "详细文档："
-    Write-Host "- 环境配置: docs/environment-configuration.md"
-    Write-Host "- 认证设置: docs/authentication-setup.md"
-    Write-Host "- 日常使用: docs/daily-usage.md"
+    Write-Host "- 项目说明: README.md"
+    Write-Host "- Docker 部署: docker/README.md"
     Write-Host ""
 }
 

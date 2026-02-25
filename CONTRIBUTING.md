@@ -1,106 +1,59 @@
-# Contributing to AI Studio Proxy API
+# Contributing to AI Studio Proxy API EN
 
-Thank you for your interest in contributing! We welcome bug reports, feature requests, and pull requests.
+Thank you for your interest in contributing. Bug reports, feature proposals, and pull requests are welcome.
 
 ## Getting Started
 
-### Fork & Clone
+### Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/AIstudioProxyAPI.git
-cd AIstudioProxyAPI
+git clone https://github.com/MasuRii/AIstudioProxyAPI-EN.git
+cd AIstudioProxyAPI-EN
 ```
 
-### Install Dependencies
+### Install dependencies
 
 ```bash
-# Install Poetry (if not already installed)
+# Install Poetry (if needed)
 curl -sSL https://install.python-poetry.org | python3 -
 
-# Install dependencies
+# Install project dependencies
 poetry install --with dev
 ```
 
-### Run the Test Suite
+## Development Workflow
 
-```bash
-poetry run pytest
-```
-
-## Making Changes
-
-1. **Create a branch**: `git checkout -b feature/your-feature`
-2. **Make your changes**
-3. **Run checks** before committing:
+1. Create a branch:
+   ```bash
+   git checkout -b feature/your-change
+   ```
+2. Implement your changes.
+3. Run local checks before committing:
    ```bash
    poetry run ruff check .
-   poetry run ruff format .
    poetry run pyright
    poetry run pytest
    ```
-4. **Commit** using [Conventional Commits](https://www.conventionalcommits.org/):
-   - `feat:` New feature
-   - `fix:` Bug fix
-   - `docs:` Documentation
-   - `refactor:` Code restructuring
-5. **Open a Pull Request**
+4. Commit using [Conventional Commits](https://www.conventionalcommits.org/).
+5. Open a Pull Request.
 
-## Code Style
+## CI Notes
 
-We use:
-
-- **Ruff** for linting and formatting
-- **Pyright** for type checking
-- **80% test coverage** minimum for modified files
-
-See [Development Guide](docs/development-guide.md) for detailed coding conventions.
-
-## CI/CD & GitHub Workflows
-
-We use GitHub Actions to ensure code quality and manage releases.
-
-### 1. PR Checks
-Triggered on every Pull Request and push to `main`. Your PR **must** pass these checks to be merged:
-- **Linting**: `ruff check .`
-- **Type Checking**: `pyright`
-- **Tests**: `pytest`
-
-**Tip:** Run these checks locally before submitting to avoid CI failures:
-```bash
-poetry run ruff check .
-poetry run pyright
-poetry run pytest
-```
-
-### 2. Upstream Sync
-Runs daily at 00:00 UTC to sync with the [upstream repository](https://github.com/CJackHwang/AIstudioProxyAPI).
-- Creates a Pull Request automatically if new upstream commits are found.
-- Can be triggered manually via the **Actions** tab.
-
-### 3. Release Process
-Automates release creation.
-- **Trigger**: Push a tag (e.g., `v4.0.6`) or trigger manually via **Actions**.
-- **Action**: Creates a GitHub Release with auto-generated changelog and source archives.
-
-To create a release:
-```bash
-git tag v4.0.6
-git push origin v4.0.6
-```
+GitHub Actions runs lint, type-check, and test workflows on pull requests and pushes.
 
 ## Reporting Issues
 
 Please include:
 
 - Steps to reproduce
-- Expected vs actual behavior
+- Expected behavior vs actual behavior
 - Python version and OS
-- Relevant logs (from `errors_py/` if available)
+- Relevant logs (for example from `logs/` or `errors_py/`)
 
-## Questions?
+## Questions
 
-- Check [Troubleshooting Guide](docs/troubleshooting.md)
-- Open a Discussion or Issue
+- Check [README.md](README.md)
+- Open a GitHub Issue
 
 ## License
 
