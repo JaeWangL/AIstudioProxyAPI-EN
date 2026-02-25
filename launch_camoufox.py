@@ -15,6 +15,7 @@ import shutil
 import signal
 import socket
 import subprocess
+from typing import List, Optional
 
 #!/usr/bin/env python3
 # launch_camoufox.py
@@ -36,6 +37,9 @@ from server import app  # Import FastAPI app object from server.py
 # -----------------
 
 # Try importing launch_server (for internal launch mode, simulating Camoufox behavior)
+launch_server = None
+DefaultAddons = None
+
 try:
     import camoufox.server
     import camoufox.utils
@@ -60,7 +64,7 @@ try:
         return opts
 
     # Replace the function in camoufox.server module so launch_server uses our wrapper
-    camoufox.server.launch_options = _patched_launch_options
+    setattr(camoufox.server, "launch_options", _patched_launch_options)
     # --- Monkeypatch Fix End ---
 
 except ImportError:
@@ -120,6 +124,12 @@ logger = logging.getLogger("CamoufoxLauncher")
 
 # --- WebSocket endpoint regex ---
 ws_regex = re.compile(r"(ws://\S+)")
+_ansi_escape_regex = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+
+def _sanitize_subprocess_line(line: str) -> str:
+    """Remove ANSI escape sequences and trailing newlines from subprocess output."""
+    return _ansi_escape_regex.sub("", line).rstrip("\r\n")
 
 
 # --- Thread-safe output queue handler (_enqueue_output) (from dev - more robust error handling) ---
@@ -594,7 +604,7 @@ def kill_process_interactive(pid: int) -> bool:
 def input_with_timeout(prompt_message: str, timeout_seconds: int = 30) -> str:
     print(prompt_message, end="", flush=True)
     if sys.platform == "win32":
-        user_input_container = [None]
+        user_input_container: List[Optional[str]] = [None]
 
         def get_input_in_thread():
             try:
@@ -624,7 +634,7 @@ def get_proxy_from_gsettings():
     Returns a proxy string like "http://host:port" or None.
     """
 
-    def _run_gsettings_command(command_parts: list[str]) -> str | None:
+    def _run_gsettings_command(command_parts: List[str]) -> Optional[str]:
         """Helper function to run gsettings command and return cleaned string output."""
         try:
             process_result = subprocess.run(
@@ -937,6 +947,11 @@ if __name__ == "__main__":
             )
             sys.exit(1)
 
+        launch_server_fn = launch_server
+        default_addons_cls = DefaultAddons
+        assert launch_server_fn is not None
+        assert default_addons_cls is not None
+
         internal_mode_arg = args.internal_launch_mode
         auth_file = args.internal_auth_file
         camoufox_port_internal = args.internal_camoufox_port
@@ -967,7 +982,7 @@ if __name__ == "__main__":
                 "addons": [],
                 # "proxy": camoufox_proxy_internal, # Removed
                 "exclude_addons": [
-                    DefaultAddons.UBO
+                    default_addons_cls.UBO
                 ],  # Assuming DefaultAddons.UBO exists
                 "window": (1440, 900),
             }
@@ -1008,11 +1023,11 @@ if __name__ == "__main__":
             )
 
             if internal_mode_arg == "headless":
-                launch_server(headless=True, **launch_args_for_internal_camoufox)
+                launch_server_fn(headless=True, **launch_args_for_internal_camoufox)
             elif internal_mode_arg == "virtual_headless":
-                launch_server(headless="virtual", **launch_args_for_internal_camoufox)
+                launch_server_fn(headless="virtual", **launch_args_for_internal_camoufox)
             elif internal_mode_arg == "debug":
-                launch_server(headless=False, **launch_args_for_internal_camoufox)
+                launch_server_fn(headless=False, **launch_args_for_internal_camoufox)
 
             print(
                 f"--- [Internal Camoufox Launch] camoufox.server.launch_server ({internal_mode_arg} mode) call finished/blocked. Script will wait for it to end. ---",
@@ -1532,17 +1547,21 @@ if __name__ == "__main__":
                         break
                     continue
 
-                log_line_content = f"[InternalCamoufox-{stream_name}-PID:{camoufox_proc.pid}]: {line_from_camoufox.rstrip()}"
+                sanitized_line = _sanitize_subprocess_line(line_from_camoufox)
+                if not sanitized_line:
+                    continue
+
+                log_line_content = f"[InternalCamoufox-{stream_name}-PID:{camoufox_proc.pid}]: {sanitized_line}"
                 if (
                     stream_name == "stderr"
-                    or "ERROR" in line_from_camoufox.upper()
-                    or "❌" in line_from_camoufox
+                    or "ERROR" in sanitized_line.upper()
+                    or "❌" in sanitized_line
                 ):
                     logger.warning(log_line_content)
                 else:
                     logger.info(log_line_content)
 
-                ws_match = ws_regex.search(line_from_camoufox)
+                ws_match = ws_regex.search(sanitized_line)
                 if ws_match:
                     captured_ws_endpoint = ws_match.group(1)
                     logger.info(
