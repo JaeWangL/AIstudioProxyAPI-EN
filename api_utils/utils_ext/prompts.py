@@ -2,10 +2,12 @@ import base64
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, cast
+from contextlib import suppress
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 from urllib.parse import unquote, urlparse
 
 from api_utils.utils_ext.files import extract_data_url_to_local, save_blob_to_local
+from api_utils.utils_ext.function_calling import convert_tool_choice
 from api_utils.utils_ext.function_calling_orchestrator import should_skip_tool_injection
 from logging_utils import set_request_id
 from models import Message
@@ -15,12 +17,13 @@ if TYPE_CHECKING:
 
 
 def prepare_combined_prompt(
-    messages: List[Message],
+    messages: list[Message],
     req_id: str,
-    tools: Optional[List[Dict[str, Any]]] = None,
-    tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+    tools: Optional[list[dict[str, Any]]] = None,
+    tool_choice: Optional[Union[str, dict[str, Any]]] = None,
     fc_state: Optional["FunctionCallingState"] = None,
-) -> Tuple[str, List[str]]:
+    parallel_tool_calls: Optional[bool] = True,
+) -> tuple[str, list[str]]:
     """Prepare combined prompt"""
     logger = logging.getLogger("AIStudioProxyServer")
     set_request_id(req_id)
@@ -31,84 +34,159 @@ def prepare_combined_prompt(
     # Do not clear upload_files here; it is cleared by the upper layer at the start of each request as needed
     # to avoid "file not found" errors caused by loss of historical attachments.
 
-    combined_parts: List[str] = []
+    combined_parts: list[str] = []
     system_prompt_content: Optional[str] = None
-    processed_system_message_indices: Set[int] = set()
-    files_list: List[
+    processed_system_message_indices: set[int] = set()
+    files_list: list[
         str
     ] = []  # Collect local file paths to be uploaded (images, videos, PDFs, etc.)
 
-    # If available tools are declared, inject the tool catalog before the prompt to help the model know available functions
-    # Skip injection when using native function calling mode (tools configured via UI)
-    # Pass fc_state to handle AUTO mode fallback correctly
-    if isinstance(tools, list) and len(tools) > 0:
-        if should_skip_tool_injection(tools, fc_state=fc_state):
-            logger.debug(
-                f"[{req_id}] Skipping tool catalog injection - native mode active and configured"
+    tool_choice_config = convert_tool_choice(tool_choice)
+    tool_choice_mode = tool_choice_config.mode if tool_choice_config else None
+    allowed_function_names: set[str] = set()
+    if tool_choice_config and tool_choice_config.allowed_function_names:
+        allowed_function_names = {
+            name
+            for name in tool_choice_config.allowed_function_names
+            if isinstance(name, str) and name
+        }
+
+    # If available tools are declared, inject the tool catalog before the prompt to help the model know available functions.
+    # Skip injection when using native function calling mode (tools configured via UI) or when tool_choice=none.
+    inject_tools = isinstance(tools, list) and len(tools) > 0
+    if inject_tools and should_skip_tool_injection(tools, fc_state=fc_state):
+        inject_tools = False
+        logger.debug(
+            f"[{req_id}] Skipping tool catalog injection - native mode active and configured"
+        )
+
+    if inject_tools and tool_choice_mode == "NONE":
+        inject_tools = False
+        logger.debug(
+            f"[{req_id}] Skipping tool catalog injection - tool_choice=none"
+        )
+
+    if inject_tools and isinstance(tools, list):
+        try:
+            available_tool_names: set[str] = set()
+            for t in tools:
+                if not isinstance(t, dict):
+                    continue
+                fn_obj = t.get("function") if "function" in t else t
+                if isinstance(fn_obj, dict):
+                    name_raw = fn_obj.get("name") or t.get("name")
+                    if isinstance(name_raw, str) and name_raw:
+                        available_tool_names.add(name_raw)
+                else:
+                    name_raw = t.get("name")
+                    if isinstance(name_raw, str) and name_raw:
+                        available_tool_names.add(name_raw)
+
+            enforce_allowed_filter = bool(
+                allowed_function_names
+                and available_tool_names.intersection(allowed_function_names)
+            )
+
+            tool_lines: list[str] = ["Available Tools Catalog:"]
+            for t in tools:
+                name: Optional[str] = None
+                params_schema: Optional[dict[str, Any]] = None
+                # t is Dict[str, Any] from List[Dict[str, Any]]
+                fn_val: Any = t.get("function") if "function" in t else t
+                if isinstance(fn_val, dict):
+                    # Type narrowed: fn_val is dict
+                    typed_fn: dict[str, Any] = cast(dict[str, Any], fn_val)
+                    name_raw: Any = typed_fn.get("name") or t.get("name")
+                    if isinstance(name_raw, str):
+                        name = name_raw
+                    params_raw: Any = typed_fn.get("parameters")
+                    if isinstance(params_raw, dict):
+                        params_schema = cast(dict[str, Any], params_raw)
+                else:
+                    # fn_val is not dict, get name directly from t
+                    name_raw: Any = t.get("name")
+                    if isinstance(name_raw, str):
+                        name = name_raw
+
+                if (
+                    enforce_allowed_filter
+                    and allowed_function_names
+                    and name not in allowed_function_names
+                ):
+                    continue
+
+                if name:
+                    tool_lines.append(f"- Function: {name}")
+                    if params_schema:
+                        with suppress(Exception):
+                            tool_lines.append(
+                                f"  Parameter Schema: {json.dumps(params_schema, ensure_ascii=False)}"
+                            )
+
+            if tool_choice:
+                # Explicitly request or suggest callable function name
+                chosen_name: Optional[str] = None
+                if isinstance(tool_choice, dict):
+                    # Type narrowed to dict by isinstance
+                    typed_tool_choice: dict[str, Any] = tool_choice
+                    fn_val: Any = typed_tool_choice.get("function")
+                    if isinstance(fn_val, dict):
+                        # Standard format: {"type": "function", "function": {"name": "..."}}
+                        typed_fn: dict[str, Any] = cast(dict[str, Any], fn_val)
+                        name_raw: Any = typed_fn.get("name")
+                        if isinstance(name_raw, str):
+                            chosen_name = name_raw
+                    elif "name" in typed_tool_choice:
+                        # Flat format: {"type": "function", "name": "..."}
+                        name_raw = typed_tool_choice.get("name")
+                        if isinstance(name_raw, str):
+                            chosen_name = name_raw
+                elif tool_choice.lower() not in (
+                    "auto",
+                    "none",
+                    "no",
+                    "off",
+                    "required",
+                    "any",
+                ):
+                    chosen_name = tool_choice
+
+                if not chosen_name and allowed_function_names:
+                    chosen_name = sorted(allowed_function_names)[0]
+
+                if chosen_name:
+                    tool_lines.append(f"Recommended function to use: {chosen_name}")
+
+            combined_parts.append("\n".join(tool_lines) + "\n---\n")
+        except Exception:
+            pass
+
+    # Inject tool-choice policy hints for emulated mode so behavior mirrors Gemini toolConfig intent.
+    policy_lines: list[str] = []
+    if tool_choice_mode == "NONE":
+        policy_lines.append("Tool Choice Policy: NONE (Do not call any function).")
+    elif tool_choice_mode == "AUTO":
+        policy_lines.append(
+            "Tool Choice Policy: AUTO (Call functions only when necessary)."
+        )
+    elif tool_choice_mode == "ANY":
+        if allowed_function_names:
+            allowed_str = ", ".join(sorted(allowed_function_names))
+            policy_lines.append(
+                f"Tool Choice Policy: REQUIRED function call. Allowed functions: {allowed_str}."
             )
         else:
-            try:
-                tool_lines: List[str] = ["Available Tools Catalog:"]
-                for t in tools:
-                    name: Optional[str] = None
-                    params_schema: Optional[Dict[str, Any]] = None
-                    # t is Dict[str, Any] from List[Dict[str, Any]]
-                    fn_val: Any = t.get("function") if "function" in t else t
-                    if isinstance(fn_val, dict):
-                        # Type narrowed: fn_val is dict
-                        typed_fn: Dict[str, Any] = cast(Dict[str, Any], fn_val)
-                        name_raw: Any = typed_fn.get("name") or t.get("name")
-                        if isinstance(name_raw, str):
-                            name = name_raw
-                        params_raw: Any = typed_fn.get("parameters")
-                        if isinstance(params_raw, dict):
-                            params_schema = cast(Dict[str, Any], params_raw)
-                    else:
-                        # fn_val is not dict, get name directly from t
-                        name_raw: Any = t.get("name")
-                        if isinstance(name_raw, str):
-                            name = name_raw
-                    if name:
-                        tool_lines.append(f"- Function: {name}")
-                        if params_schema:
-                            try:
-                                tool_lines.append(
-                                    f"  Parameter Schema: {json.dumps(params_schema, ensure_ascii=False)}"
-                                )
-                            except Exception:
-                                pass
-                if tool_choice:
-                    # Explicitly request or suggest callable function name
-                    chosen_name: Optional[str] = None
-                    if isinstance(tool_choice, dict):
-                        # Type narrowed to dict by isinstance
-                        typed_tool_choice: Dict[str, Any] = tool_choice
-                        fn_val: Any = typed_tool_choice.get("function")
-                        if isinstance(fn_val, dict):
-                            # Standard format: {"type": "function", "function": {"name": "..."}}
-                            typed_fn: Dict[str, Any] = cast(Dict[str, Any], fn_val)
-                            name_raw: Any = typed_fn.get("name")
-                            if isinstance(name_raw, str):
-                                chosen_name = name_raw
-                        elif "name" in typed_tool_choice:
-                            # Flat format: {"type": "function", "name": "..."}
-                            name_raw = typed_tool_choice.get("name")
-                            if isinstance(name_raw, str):
-                                chosen_name = name_raw
-                    elif tool_choice.lower() not in (
-                        "auto",
-                        "none",
-                        "no",
-                        "off",
-                        "required",
-                        "any",
-                    ):
-                        chosen_name = tool_choice
-                    if chosen_name:
-                        tool_lines.append(f"Recommended function to use: {chosen_name}")
-                combined_parts.append("\n".join(tool_lines) + "\n---\n")
-            except Exception:
-                pass
+            policy_lines.append(
+                "Tool Choice Policy: REQUIRED function call (at least one function must be called)."
+            )
+
+    if parallel_tool_calls is False:
+        policy_lines.append(
+            "Parallel Tool Calls: DISABLED (call at most one function in a single response)."
+        )
+
+    if policy_lines:
+        combined_parts.append("\n".join(policy_lines) + "\n---\n")
 
     # Process system messages
     for i, msg in enumerate(messages):
@@ -150,7 +228,7 @@ def prepare_combined_prompt(
 
         role = msg.role or "unknown"
         role_prefix_ui = f"{role_map_ui.get(role, role.capitalize())}:\n"
-        current_turn_parts: List[str] = [role_prefix_ui]
+        current_turn_parts: list[str] = [role_prefix_ui]
 
         content = msg.content or ""
         content_str: str = ""
@@ -159,7 +237,7 @@ def prepare_combined_prompt(
             content_str = content.strip()
         elif isinstance(content, list):
             # Process multimodal content
-            text_parts: List[str] = []
+            text_parts: list[str] = []
             for item in content:
                 # Get item type
                 item_type: Optional[str] = None
@@ -171,7 +249,7 @@ def prepare_combined_prompt(
                     item_type = None
 
                 if item_type is None and isinstance(item, dict):
-                    typed_item: Dict[str, Any] = cast(Dict[str, Any], item)
+                    typed_item: dict[str, Any] = cast(dict[str, Any], item)
                     item_type_raw: Any = typed_item.get("type")
                     if isinstance(item_type_raw, str):
                         item_type = item_type_raw
@@ -181,7 +259,7 @@ def prepare_combined_prompt(
                     if hasattr(item, "text"):
                         text_parts.append(getattr(item, "text", "") or "")
                     elif isinstance(item, dict):
-                        typed_item: Dict[str, Any] = cast(Dict[str, Any], item)
+                        typed_item: dict[str, Any] = cast(dict[str, Any], item)
                         text_raw: Any = typed_item.get("text", "")
                         text_parts.append(str(text_raw))
                     continue
@@ -237,13 +315,13 @@ def prepare_combined_prompt(
                             url_value = item.url
                         # Dictionary structure (backwards compatibility)
                         if url_value is None and isinstance(item, dict):
-                            typed_item: Dict[str, Any] = cast(Dict[str, Any], item)
+                            typed_item: dict[str, Any] = cast(dict[str, Any], item)
                             image_url_raw: Any = typed_item.get("image_url")
                             input_image_raw: Any = typed_item.get("input_image")
 
                             if isinstance(image_url_raw, dict):
-                                typed_img_url: Dict[str, Any] = cast(
-                                    Dict[str, Any], image_url_raw
+                                typed_img_url: dict[str, Any] = cast(
+                                    dict[str, Any], image_url_raw
                                 )
                                 url_raw: Any = typed_img_url.get("url")
                                 if isinstance(url_raw, str):
@@ -256,8 +334,8 @@ def prepare_combined_prompt(
                             elif isinstance(image_url_raw, str):
                                 url_value = image_url_raw
                             elif isinstance(input_image_raw, dict):
-                                typed_input_img: Dict[str, Any] = cast(
-                                    Dict[str, Any], input_image_raw
+                                typed_input_img: dict[str, Any] = cast(
+                                    dict[str, Any], input_image_raw
                                 )
                                 url_raw: Any = typed_input_img.get("url")
                                 if isinstance(url_raw, str):
@@ -276,8 +354,8 @@ def prepare_combined_prompt(
                                 file_raw: Any = typed_item.get("file")
 
                                 if isinstance(file_url_raw, dict):
-                                    typed_file_url: Dict[str, Any] = cast(
-                                        Dict[str, Any], file_url_raw
+                                    typed_file_url: dict[str, Any] = cast(
+                                        dict[str, Any], file_url_raw
                                     )
                                     url_raw: Any = typed_file_url.get("url")
                                     if isinstance(url_raw, str):
@@ -285,8 +363,8 @@ def prepare_combined_prompt(
                                 elif isinstance(file_url_raw, str):
                                     url_value = file_url_raw
                                 elif isinstance(media_url_raw, dict):
-                                    typed_media_url: Dict[str, Any] = cast(
-                                        Dict[str, Any], media_url_raw
+                                    typed_media_url: dict[str, Any] = cast(
+                                        dict[str, Any], media_url_raw
                                     )
                                     url_raw: Any = typed_media_url.get("url")
                                     if isinstance(url_raw, str):
@@ -299,8 +377,8 @@ def prepare_combined_prompt(
                                         url_value = url_raw
                                 elif isinstance(file_raw, dict):
                                     # Compatible with general file field
-                                    typed_file: Dict[str, Any] = cast(
-                                        Dict[str, Any], file_raw
+                                    typed_file: dict[str, Any] = cast(
+                                        dict[str, Any], file_raw
                                     )
                                     url_raw: Any = typed_file.get(
                                         "url"
@@ -358,7 +436,7 @@ def prepare_combined_prompt(
                         elif hasattr(item, "input_video") and item.input_video:
                             inp = item.input_video
                         elif isinstance(item, dict):
-                            typed_item: Dict[str, Any] = cast(Dict[str, Any], item)
+                            typed_item: dict[str, Any] = cast(dict[str, Any], item)
                             inp = typed_item.get("input_audio") or typed_item.get(
                                 "input_video"
                             )
@@ -369,7 +447,7 @@ def prepare_combined_prompt(
                             mime_val: Optional[str] = None
                             fmt_val: Optional[str] = None
                             if isinstance(inp, dict):
-                                typed_inp: Dict[str, Any] = cast(Dict[str, Any], inp)
+                                typed_inp: dict[str, Any] = cast(dict[str, Any], inp)
                                 url_raw: Any = typed_inp.get("url")
                                 if isinstance(url_raw, str):
                                     url_value = url_raw
@@ -461,7 +539,7 @@ def prepare_combined_prompt(
             content_str = "\n".join(text_parts).strip()
         elif isinstance(content, dict):
             # Compatible with dictionary format content, may contain 'attachments'/'images'/'media'/'files'
-            typed_content: Dict[str, Any] = cast(Dict[str, Any], content)
+            typed_content: dict[str, Any] = cast(dict[str, Any], content)
             text_parts = []
             attachments_keys = ["attachments", "images", "media", "files"]
             for key in attachments_keys:
@@ -472,7 +550,7 @@ def prepare_combined_prompt(
                         if isinstance(it, str):
                             url_value = it
                         elif isinstance(it, dict):
-                            typed_it: Dict[str, Any] = cast(Dict[str, Any], it)
+                            typed_it: dict[str, Any] = cast(dict[str, Any], it)
                             url_raw: Any = typed_it.get("url") or typed_it.get("path")
                             if isinstance(url_raw, str):
                                 url_value = url_raw
@@ -480,15 +558,15 @@ def prepare_combined_prompt(
                                 image_url_raw: Any = typed_it.get("image_url")
                                 input_image_raw: Any = typed_it.get("input_image")
                                 if isinstance(image_url_raw, dict):
-                                    typed_img_url: Dict[str, Any] = cast(
-                                        Dict[str, Any], image_url_raw
+                                    typed_img_url: dict[str, Any] = cast(
+                                        dict[str, Any], image_url_raw
                                     )
                                     url_from_image: Any = typed_img_url.get("url")
                                     if isinstance(url_from_image, str):
                                         url_value = url_from_image
                                 elif isinstance(input_image_raw, dict):
-                                    typed_input_img: Dict[str, Any] = cast(
-                                        Dict[str, Any], input_image_raw
+                                    typed_input_img: dict[str, Any] = cast(
+                                        dict[str, Any], input_image_raw
                                     )
                                     url_from_input: Any = typed_input_img.get("url")
                                     if isinstance(url_from_input, str):
@@ -570,7 +648,7 @@ def prepare_combined_prompt(
 
         # Handle tool result messages (role = 'tool'): include in prompt so model sees tool output
         if role == "tool":
-            tool_result_lines: List[str] = []
+            tool_result_lines: list[str] = []
             # Standard OpenAI style: content is string, tool_call_id associates with previous call
             tool_call_id = getattr(msg, "tool_call_id", None)
             if tool_call_id:
@@ -580,7 +658,7 @@ def prepare_combined_prompt(
             elif isinstance(msg.content, list):
                 # Compatible with few clients putting results in a list
                 try:
-                    merged_parts: List[str] = []
+                    merged_parts: list[str] = []
                     for it in msg.content:
                         if isinstance(it, dict):
                             if it.get("type") == "text":

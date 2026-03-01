@@ -11,8 +11,9 @@ Includes caching to skip redundant UI operations for subsequent requests with sa
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Optional, Union
 
 from browser_utils.page_controller import PageController
 from logging_utils.fc_debug import FCModule, get_fc_logger
@@ -28,6 +29,7 @@ from api_utils.utils_ext.function_calling import (  # noqa: E501
     ResponseFormatter,
     SchemaConversionError,
     SchemaConverter,
+    convert_tool_choice,
     get_finish_reason,
 )
 from api_utils.utils_ext.function_calling_cache import FunctionCallingCache
@@ -68,6 +70,9 @@ class FunctionCallingState:
     error_message: Optional[str] = None
     tools_digest: Optional[str] = None
     cache_hit: bool = False
+    tool_choice_mode: Optional[str] = None
+    allowed_function_names: list[str] = field(default_factory=list)
+    parallel_tool_calls: bool = True
 
 
 class FunctionCallingOrchestrator:
@@ -192,8 +197,8 @@ class FunctionCallingOrchestrator:
 
     def should_use_native_mode(
         self,
-        tools: Optional[List[Dict[str, Any]]],
-        tool_choice: Optional[Union[str, Dict[str, Any]]],
+        tools: Optional[list[dict[str, Any]]],
+        tool_choice: Optional[Union[str, dict[str, Any]]],
     ) -> bool:
         """Determine if native mode should be attempted for this request.
 
@@ -231,7 +236,7 @@ class FunctionCallingOrchestrator:
 
     def get_effective_mode(
         self,
-        tools: Optional[List[Dict[str, Any]]],
+        tools: Optional[list[dict[str, Any]]],
     ) -> FunctionCallingMode:
         """Get the effective function calling mode for a request.
 
@@ -246,14 +251,54 @@ class FunctionCallingOrchestrator:
 
         return self._config.mode
 
+    @staticmethod
+    def _extract_tool_name(tool: dict[str, Any]) -> Optional[str]:
+        """Extract function name from an OpenAI tool definition."""
+        if not isinstance(tool, dict):
+            return None
+
+        function_def = tool.get("function")
+        if isinstance(function_def, dict):
+            name = function_def.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+
+        name = tool.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+
+        return None
+
+    def _filter_tools_by_allowed_names(
+        self,
+        tools: list[dict[str, Any]],
+        allowed_names: list[str],
+    ) -> list[dict[str, Any]]:
+        """Filter tool list to only allowed function names (tool_choice policy)."""
+        if not allowed_names:
+            return tools
+
+        allowed = {name for name in allowed_names if isinstance(name, str) and name}
+        if not allowed:
+            return tools
+
+        filtered: list[dict[str, Any]] = []
+        for tool in tools:
+            tool_name = self._extract_tool_name(tool)
+            if tool_name and tool_name in allowed:
+                filtered.append(tool)
+
+        return filtered
+
     async def prepare_request(
         self,
-        tools: Optional[List[Dict[str, Any]]],
-        tool_choice: Optional[Union[str, Dict[str, Any]]],
+        tools: Optional[list[dict[str, Any]]],
+        tool_choice: Optional[Union[str, dict[str, Any]]],
         page_controller: PageController,
         check_client_disconnected: Callable,
         req_id: str,
         model_name: Optional[str] = None,
+        parallel_tool_calls: Optional[bool] = True,
     ) -> FunctionCallingState:
         """Prepare a request for function calling based on the configured mode.
 
@@ -272,12 +317,18 @@ class FunctionCallingOrchestrator:
             check_client_disconnected: Callback to check client connection.
             req_id: Request ID for logging.
             model_name: Optional model name for cache validation.
+            parallel_tool_calls: Whether multiple tool calls are allowed in one turn.
 
         Returns:
             FunctionCallingState with the configuration result.
         """
         total_start = time.perf_counter()
-        state = FunctionCallingState(mode=self.get_effective_mode(tools))
+        state = FunctionCallingState(
+            mode=self.get_effective_mode(tools),
+            parallel_tool_calls=bool(parallel_tool_calls)
+            if parallel_tool_calls is not None
+            else True,
+        )
 
         # No tools provided - ensure FC toggle is disabled if it was previously enabled
         if not tools or len(tools) == 0:
@@ -292,6 +343,60 @@ class FunctionCallingOrchestrator:
                 )
             return state
 
+        # Convert OpenAI tool_choice to normalized Gemini-style policy
+        tool_choice_config = convert_tool_choice(tool_choice)
+        if tool_choice_config:
+            state.tool_choice_mode = tool_choice_config.mode
+            state.allowed_function_names = tool_choice_config.allowed_function_names or []
+            if FUNCTION_CALLING_DEBUG:
+                self.logger.info(
+                    f"[{req_id}] [FC] Tool choice policy: mode={tool_choice_config.mode}, "
+                    f"allowed={state.allowed_function_names or 'ALL'}"
+                )
+
+        # tool_choice=none means function calls are explicitly disabled
+        if tool_choice_config and tool_choice_config.mode == "NONE":
+            await self._ensure_fc_disabled_when_no_tools(
+                page_controller=page_controller,
+                check_client_disconnected=check_client_disconnected,
+                req_id=req_id,
+            )
+            state.mode = FunctionCallingMode.EMULATED
+            state.error_message = "tool_choice=none disables native function calling"
+            if FUNCTION_CALLING_DEBUG:
+                fc_logger.log_mode_selection(req_id, "emulated", "tool_choice_none")
+            return state
+
+        # Apply allowed-function policy when a specific tool is forced
+        effective_tools = tools
+        if tool_choice_config and tool_choice_config.allowed_function_names:
+            effective_tools = self._filter_tools_by_allowed_names(
+                tools,
+                tool_choice_config.allowed_function_names,
+            )
+            if not effective_tools:
+                message = (
+                    "tool_choice requested specific function(s) not present in tools"
+                )
+                if state.mode == FunctionCallingMode.AUTO and self._config.native_fallback:
+                    state.fallback_used = True
+                    state.mode = FunctionCallingMode.EMULATED
+                    state.error_message = message
+                    if FUNCTION_CALLING_DEBUG:
+                        fc_logger.log_mode_selection(
+                            req_id,
+                            "emulated",
+                            "fallback_invalid_tool_choice",
+                        )
+                    return state
+                raise NativeFunctionCallingError(message)
+
+            if FUNCTION_CALLING_DEBUG and len(effective_tools) != len(tools):
+                self.logger.info(
+                    f"[{req_id}] [FC] Filtered tools by allowed names: "
+                    f"{len(tools)} -> {len(effective_tools)}"
+                )
+
         if state.mode == FunctionCallingMode.EMULATED:
             if self._config.debug:
                 self.logger.debug(
@@ -302,7 +407,7 @@ class FunctionCallingOrchestrator:
             return state
 
         # Native or Auto mode - compute digest and check cache
-        tools_digest = self._cache.compute_tools_digest(tools)
+        tools_digest = self._cache.compute_tools_digest(effective_tools)
         state.tools_digest = tools_digest
 
         # Check cache first
@@ -370,12 +475,12 @@ class FunctionCallingOrchestrator:
         # Cache miss - proceed with native configuration
         if FUNCTION_CALLING_DEBUG:
             self.logger.info(
-                f"[{req_id}] [FC] Configuring native function calling with {len(tools)} tool(s) "
+                f"[{req_id}] [FC] Configuring native function calling with {len(effective_tools)} tool(s) "
                 f"(digest={tools_digest[:8]}...)"
             )
         if FUNCTION_CALLING_DEBUG:
             fc_logger.log_mode_selection(
-                req_id, "native", f"cache_miss, {len(tools)} tools"
+                req_id, "native", f"cache_miss, {len(effective_tools)} tools"
             )
 
         # Log tool choice if specific
@@ -384,11 +489,10 @@ class FunctionCallingOrchestrator:
                 forced_fn = tool_choice.get("function", {}).get(
                     "name"
                 ) or tool_choice.get("name")
-                if forced_fn:
-                    if FUNCTION_CALLING_DEBUG:
-                        self.logger.info(
-                            f"[{req_id}] [FC] Tool choice: FORCING specific tool '{forced_fn}'"
-                        )
+                if forced_fn and FUNCTION_CALLING_DEBUG:
+                    self.logger.info(
+                        f"[{req_id}] [FC] Tool choice: FORCING specific tool '{forced_fn}'"
+                    )
             elif isinstance(tool_choice, str) and tool_choice.lower() not in (
                 "auto",
                 "none",
@@ -402,28 +506,29 @@ class FunctionCallingOrchestrator:
         try:
             # Convert OpenAI tools to Gemini format
             convert_start = time.perf_counter()
-            gemini_declarations = self._schema_converter.convert_tools(tools)
+            gemini_declarations = self._schema_converter.convert_tools(effective_tools)
             convert_elapsed = time.perf_counter() - convert_start
 
             if self._config.debug:
                 self.logger.debug(
-                    f"[{req_id}] [FC:Perf] Converted {len(tools)} tools to Gemini format "
+                    f"[{req_id}] [FC:Perf] Converted {len(effective_tools)} tools to Gemini format "
                     f"in {convert_elapsed:.3f}s"
                 )
             if FUNCTION_CALLING_DEBUG:
                 fc_logger.log_schema_conversion(
-                    req_id, tool_count=len(tools), elapsed_ms=convert_elapsed * 1000
+                    req_id,
+                    tool_count=len(effective_tools),
+                    elapsed_ms=convert_elapsed * 1000,
                 )
 
             # Retry loop for UI automation
             last_error: Optional[Exception] = None
             for attempt in range(1, self._config.native_retry_count + 1):
                 try:
-                    if attempt > 1:
-                        if FUNCTION_CALLING_DEBUG:
-                            self.logger.warning(
-                                f"[{req_id}] [FC:UI] Retry attempt {attempt}/{self._config.native_retry_count}"
-                            )
+                    if attempt > 1 and FUNCTION_CALLING_DEBUG:
+                        self.logger.warning(
+                            f"[{req_id}] [FC:UI] Retry attempt {attempt}/{self._config.native_retry_count}"
+                        )
 
                     check_client_disconnected(f"FC prepare attempt {attempt}")
 
@@ -443,7 +548,7 @@ class FunctionCallingOrchestrator:
                         check_client_disconnected,
                         tools_digest=tools_digest,
                         model_name=model_name,
-                        tools=tools,
+                        tools=effective_tools,
                     )
 
                     if success:
@@ -614,9 +719,9 @@ class FunctionCallingOrchestrator:
 
     def format_function_calls_for_response(
         self,
-        functions: List[Dict[str, Any]],
+        functions: list[dict[str, Any]],
         content: Optional[str] = None,
-    ) -> Tuple[Dict[str, Any], str]:
+    ) -> tuple[dict[str, Any], str]:
         """Format function call data from AI Studio into OpenAI response format.
 
         Args:
@@ -630,7 +735,7 @@ class FunctionCallingOrchestrator:
         if not functions:
             return {"role": "assistant", "content": content or ""}, "stop"
 
-        parsed_calls: List[ParsedFunctionCall] = []
+        parsed_calls: list[ParsedFunctionCall] = []
         for func_data in functions:
             if isinstance(func_data, dict):
                 name = func_data.get("name", "")
@@ -650,9 +755,9 @@ class FunctionCallingOrchestrator:
 
     def format_streaming_tool_calls(
         self,
-        functions: List[Dict[str, Any]],
+        functions: list[dict[str, Any]],
         chunk_size: int = 50,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Format function calls for streaming response.
 
         Generates all the delta chunks needed to stream function calls.
@@ -667,7 +772,7 @@ class FunctionCallingOrchestrator:
         if not functions:
             return []
 
-        all_chunks: List[Dict[str, Any]] = []
+        all_chunks: list[dict[str, Any]] = []
         for idx, func_data in enumerate(functions):
             if not isinstance(func_data, dict):
                 continue
@@ -711,7 +816,7 @@ def reset_orchestrator() -> None:
 
 
 def should_skip_tool_injection(
-    tools: Optional[List[Dict[str, Any]]],
+    tools: Optional[list[dict[str, Any]]],
     fc_state: Optional[FunctionCallingState] = None,
 ) -> bool:
     """Determine if tool catalog injection should be skipped.
@@ -747,9 +852,7 @@ def should_skip_tool_injection(
         if fc_state.mode == FunctionCallingMode.EMULATED:
             return False
         # Native/Auto mode attempted but tools not configured - inject as fallback
-        if not fc_state.tools_configured:
-            return False
-        return True
+        return fc_state.tools_configured
 
     # Fall back to static config check (backwards compatibility)
     mode_str = FUNCTION_CALLING_MODE.lower()

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -121,7 +121,7 @@ def test_prepare_combined_prompt_multimodal_image(mock_file_utils, mock_logger):
     }
 
     messages = [
-        Message(role="user", content=cast(List[MessageContentItem], [content_item]))
+        Message(role="user", content=cast(list[MessageContentItem], [content_item]))
     ]
 
     prompt, files = prepare_combined_prompt(messages, "req1")
@@ -163,7 +163,7 @@ def test_prepare_combined_prompt_audio(mock_file_utils, mock_logger):
     }
 
     messages = [
-        Message(role="user", content=cast(List[MessageContentItem], [content_item]))
+        Message(role="user", content=cast(list[MessageContentItem], [content_item]))
     ]
 
     prompt, files = prepare_combined_prompt(messages, "req1")
@@ -221,7 +221,7 @@ def test_get_latest_user_text():
 
     # Test with list content
     content = [{"type": "text", "text": "Part1"}, {"type": "text", "text": "Part2"}]
-    messages = [Message(role="user", content=cast(List[MessageContentItem], content))]
+    messages = [Message(role="user", content=cast(list[MessageContentItem], content))]
     assert _get_latest_user_text(messages) == "Part1\nPart2"
 
 
@@ -323,7 +323,7 @@ def test_prepare_combined_prompt_local_files(mock_file_utils, mock_logger):
 
     content = [{"type": "image_url", "image_url": {"url": "file:///c:/test.png"}}]
 
-    messages = [Message(role="user", content=cast(List[MessageContentItem], content))]
+    messages = [Message(role="user", content=cast(list[MessageContentItem], content))]
 
     prompt, files = prepare_combined_prompt(messages, "req1")
 
@@ -409,7 +409,7 @@ def test_prepare_combined_prompt_input_audio_data_url(mock_file_utils, mock_logg
     }
 
     messages = [
-        Message(role="user", content=cast(List[MessageContentItem], [content_item]))
+        Message(role="user", content=cast(list[MessageContentItem], [content_item]))
     ]
 
     prompt, files = prepare_combined_prompt(messages, "req1")
@@ -445,7 +445,7 @@ def test_prepare_combined_prompt_input_video_processing(mock_file_utils, mock_lo
 
     messages = [
         Message(
-            role="user", content=cast(List[MessageContentItem], [item1, item2, item3])
+            role="user", content=cast(list[MessageContentItem], [item1, item2, item3])
         )
     ]
 
@@ -602,7 +602,7 @@ def test_prepare_combined_prompt_invalid_base64(mock_file_utils, mock_logger):
         "input_audio": {"data": "InvalidBase64!!!", "mime_type": "audio/mp3"},
     }
 
-    messages = [Message(role="user", content=cast(List[MessageContentItem], [item]))]
+    messages = [Message(role="user", content=cast(list[MessageContentItem], [item]))]
 
     # Should not crash, just ignore or log error
     prompt, files = prepare_combined_prompt(messages, "req1")
@@ -700,6 +700,36 @@ def test_prepare_combined_prompt_tool_choice_dict(mock_logger):
     assert "Recommended function to use: my_tool" in prompt
 
 
+def test_prepare_combined_prompt_tool_choice_none_policy(mock_logger):
+    """tool_choice='none' should inject explicit no-tools policy and skip recommendations."""
+    tools = [{"type": "function", "function": {"name": "my_tool"}}]
+    messages = [Message(role="user", content="hi")]
+
+    prompt, _ = prepare_combined_prompt(
+        messages, "req1", tools=tools, tool_choice="none"
+    )
+
+    assert "Tool Choice Policy: NONE" in prompt
+    assert "Recommended function to use" not in prompt
+
+
+def test_prepare_combined_prompt_parallel_tool_calls_disabled_policy(mock_logger):
+    """parallel_tool_calls=false should add policy hint to emulated prompt."""
+    tools = [{"type": "function", "function": {"name": "my_tool"}}]
+    messages = [Message(role="user", content="hi")]
+
+    prompt, _ = prepare_combined_prompt(
+        messages,
+        "req1",
+        tools=tools,
+        tool_choice="required",
+        parallel_tool_calls=False,
+    )
+
+    assert "Tool Choice Policy: REQUIRED function call" in prompt
+    assert "Parallel Tool Calls: DISABLED" in prompt
+
+
 def test_prepare_combined_prompt_tools_error(mock_logger):
     """Test error handling during tools processing."""
 
@@ -712,7 +742,7 @@ def test_prepare_combined_prompt_tools_error(mock_logger):
 
     # Should not crash
     prompt, _ = prepare_combined_prompt(
-        messages, "req1", tools=cast(List[Dict[str, Any]], tools)
+        messages, "req1", tools=cast(list[dict[str, Any]], tools)
     )
     assert "User:\nhi" in prompt
 
@@ -897,7 +927,7 @@ def test_prepare_combined_prompt_non_existent_local_file(mock_file_utils, mock_l
     mock_exists.return_value = False  # Not exists
 
     item = {"type": "file_url", "file_url": {"url": "file:///c:/missing.txt"}}
-    messages = [Message(role="user", content=cast(List[MessageContentItem], [item]))]
+    messages = [Message(role="user", content=cast(list[MessageContentItem], [item]))]
 
     prompt, files = prepare_combined_prompt(messages, "req1")
 
@@ -1131,7 +1161,7 @@ def test_prepare_combined_prompt_audio_absolute_path(
     }
 
     messages = [
-        Message(role="user", content=cast(List[MessageContentItem], [content_item]))
+        Message(role="user", content=cast(list[MessageContentItem], [content_item]))
     ]
 
     prompt, files = prepare_combined_prompt(messages, "req1")
@@ -1155,7 +1185,7 @@ def test_prepare_combined_prompt_video_absolute_path(
     }
 
     messages = [
-        Message(role="user", content=cast(List[MessageContentItem], [content_item]))
+        Message(role="user", content=cast(list[MessageContentItem], [content_item]))
     ]
 
     prompt, files = prepare_combined_prompt(messages, "req1")
@@ -1487,7 +1517,7 @@ def test_prepare_combined_prompt_audio_video_data_base64(mock_file_utils, mock_l
     }
 
     messages = [
-        Message(role="user", content=cast(List[MessageContentItem], [content_item]))
+        Message(role="user", content=cast(list[MessageContentItem], [content_item]))
     ]
 
     prompt, files = prepare_combined_prompt(messages, "req1")

@@ -1,6 +1,7 @@
 import asyncio
 import re
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any, Optional
 
 from playwright.async_api import expect as expect_async
 
@@ -29,11 +30,11 @@ class ParameterController(BaseController):
 
     async def adjust_parameters(
         self,
-        request_params: Dict[str, Any],
-        page_params_cache: Dict[str, Any],
+        request_params: dict[str, Any],
+        page_params_cache: dict[str, Any],
         params_cache_lock: asyncio.Lock,
         model_id_to_use: Optional[str],
-        parsed_model_list: List[Dict[str, Any]],
+        parsed_model_list: list[dict[str, Any]],
         check_client_disconnected: Callable,
     ):
         """Adjust all request parameters."""
@@ -595,7 +596,7 @@ class ParameterController(BaseController):
         """Enable URL Context (legacy wrapper)."""
         await self._adjust_url_context(True, check_client_disconnected)
 
-    def _should_enable_google_search(self, request_params: Dict[str, Any]) -> bool:
+    def _should_enable_google_search(self, request_params: dict[str, Any]) -> bool:
         """Determine if Google Search should be enabled."""
         if "tools" in request_params and request_params.get("tools") is not None:
             tools = request_params.get("tools")
@@ -606,7 +607,19 @@ class ParameterController(BaseController):
                         if tool.get("google_search_retrieval") is not None:
                             has_google_search_tool = True
                             break
-                        if tool.get("function", {}).get("name") == "googleSearch":
+
+                        # OpenAI function-style search tool wrappers
+                        function_name = tool.get("function", {}).get("name")
+                        if function_name in {"googleSearch", "web_search"}:
+                            has_google_search_tool = True
+                            break
+
+                        # Claude-style specialized web search tool type
+                        tool_type = tool.get("type")
+                        tool_name = tool.get("name")
+                        if tool_type == "web_search_20250305" or (
+                            tool_type == "web_search" and tool_name == "web_search"
+                        ):
                             has_google_search_tool = True
                             break
             self.logger.debug(
@@ -624,13 +637,11 @@ class ParameterController(BaseController):
         if not model_id:
             return True
         model_lower = model_id.lower()
-        if "gemini-2.0" in model_lower or "gemini2.0" in model_lower:
-            return False
-        return True
+        return "gemini-2.0" not in model_lower and "gemini2.0" not in model_lower
 
     async def _adjust_google_search(
         self,
-        request_params: Dict[str, Any],
+        request_params: dict[str, Any],
         model_id: Optional[str],
         check_client_disconnected: Callable,
     ):

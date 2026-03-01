@@ -63,24 +63,26 @@ class TestAnalyzeModelRequirements:
         context = make_request_context(current_ai_studio_model_id="gemini-1.5-pro")
         request = make_chat_request(model="gemini-1.5-flash")
 
-        with patch("api_utils.request_processor.MODEL_NAME", "gemini-1.5-pro"):
-            with patch(
+        with (
+            patch("api_utils.request_processor.MODEL_NAME", "gemini-1.5-pro"),
+            patch(
                 "api_utils.request_processor.ms_analyze",
                 new_callable=AsyncMock,
-            ) as mock_ms_analyze:
-                mock_ms_analyze.return_value = {
-                    **context,
-                    "need_switch": True,
-                    "model_id_to_use": "gemini-1.5-flash",
-                }
+            ) as mock_ms_analyze,
+        ):
+            mock_ms_analyze.return_value = {
+                **context,
+                "need_switch": True,
+                "model_id_to_use": "gemini-1.5-flash",
+            }
 
-                result = await _analyze_model_requirements(req_id, context, request)
+            result = await _analyze_model_requirements(req_id, context, request)
 
-                # Verify delegate was called with correct args
-                mock_ms_analyze.assert_called_once_with(
-                    req_id, context, "gemini-1.5-flash", "gemini-1.5-pro"
-                )
-                assert result["model_id_to_use"] == "gemini-1.5-flash"
+            # Verify delegate was called with correct args
+            mock_ms_analyze.assert_called_once_with(
+                req_id, context, "gemini-1.5-flash", "gemini-1.5-pro"
+            )
+            assert result["model_id_to_use"] == "gemini-1.5-flash"
 
 
 class TestValidatePageStatus:
@@ -782,6 +784,152 @@ class TestAuxiliaryStreamResponse:
             assert args["location"] == "San Francisco"
             # Content should be None when tool_calls present
             assert content["choices"][0]["message"]["content"] is None
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_stream_non_streaming_parallel_disabled_keeps_first_tool(
+        self, mock_env, make_request_context
+    ):
+        """When parallel_tool_calls is false, non-stream response should include only one tool call."""
+        from api_utils.request_processor import _handle_auxiliary_stream_response
+
+        req_id = "test-req-id"
+        request = ChatCompletionRequest(
+            messages=[Message(role="user", content="Use tools")],
+            model="gemini-1.5-pro",
+            stream=False,
+            parallel_tool_calls=False,
+            tools=[
+                {"type": "function", "function": {"name": "get_weather"}},
+                {"type": "function", "function": {"name": "get_time"}},
+            ],
+        )
+        context = make_request_context(req_id=req_id)
+        result_future = asyncio.Future()
+        submit_locator = MagicMock()
+        check_disco = MagicMock()
+
+        mock_stream_data = [
+            {
+                "body": "",
+                "done": True,
+                "reason": None,
+                "function": [
+                    {"name": "get_weather", "params": {"location": "SF"}},
+                    {"name": "get_time", "params": {"timezone": "UTC"}},
+                ],
+            },
+        ]
+
+        async def mock_stream_gen(*args, **kwargs):
+            for data in mock_stream_data:
+                yield data
+
+        with (
+            patch(
+                "api_utils.request_processor.use_stream_response",
+                side_effect=mock_stream_gen,
+            ),
+            patch(
+                "api_utils.request_processor.calculate_usage_stats",
+                return_value={
+                    "prompt_tokens": 20,
+                    "completion_tokens": 10,
+                    "total_tokens": 30,
+                },
+            ),
+        ):
+            result = await _handle_auxiliary_stream_response(
+                req_id,
+                request,
+                context,
+                result_future,
+                submit_locator,
+                check_disco,
+                timeout=30.0,
+            )
+
+            assert isinstance(result, dict)
+            assert result_future.done()
+
+            response = result_future.result()
+            content = json.loads(response.body)
+            tool_calls = content["choices"][0]["message"]["tool_calls"]
+            assert len(tool_calls) == 1
+            assert tool_calls[0]["function"]["name"] == "get_weather"
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_stream_non_streaming_filters_emulated_fc_in_reasoning(
+        self, mock_env, make_request_context
+    ):
+        """Non-streaming mode should not leak emulated function-call reasoning text."""
+        from api_utils.request_processor import _handle_auxiliary_stream_response
+
+        req_id = "test-req-id"
+        request = ChatCompletionRequest(
+            messages=[Message(role="user", content="Run command")],
+            model="gemini-1.5-pro",
+            stream=False,
+            tools=[{"type": "function", "function": {"name": "bash"}}],
+        )
+        context = make_request_context(req_id=req_id)
+        result_future = asyncio.Future()
+        submit_locator = MagicMock()
+        check_disco = MagicMock()
+
+        leaked_reasoning = (
+            "Planning...\n"
+            "Request function call: bash\n"
+            'Parameters:\n{"command":"echo hello"}'
+        )
+
+        mock_stream_data = [
+            {
+                "body": "",
+                "done": True,
+                "reason": leaked_reasoning,
+                "function": [],
+            }
+        ]
+
+        async def mock_stream_gen(*args, **kwargs):
+            for data in mock_stream_data:
+                yield data
+
+        with (
+            patch(
+                "api_utils.request_processor.use_stream_response",
+                side_effect=mock_stream_gen,
+            ),
+            patch(
+                "api_utils.request_processor.calculate_usage_stats",
+                return_value={
+                    "prompt_tokens": 20,
+                    "completion_tokens": 10,
+                    "total_tokens": 30,
+                },
+            ),
+        ):
+            result = await _handle_auxiliary_stream_response(
+                req_id,
+                request,
+                context,
+                result_future,
+                submit_locator,
+                check_disco,
+                timeout=30.0,
+            )
+
+            assert isinstance(result, dict)
+            assert result_future.done()
+
+            response = result_future.result()
+            content = json.loads(response.body)
+
+            assert content["choices"][0]["finish_reason"] == "tool_calls"
+            message = content["choices"][0]["message"]
+            assert message["content"] is None
+            assert "tool_calls" in message
+            assert message["tool_calls"][0]["function"]["name"] == "bash"
 
     @pytest.mark.asyncio
     async def test_auxiliary_stream_non_streaming_no_content_error(
@@ -1576,12 +1724,12 @@ class TestCleanupRequestResources:
         with (
             patch("os.path.isdir", return_value=True),
             patch("shutil.rmtree", side_effect=asyncio.CancelledError()),
+            pytest.raises(asyncio.CancelledError),
         ):
             # CancelledError should be re-raised
-            with pytest.raises(asyncio.CancelledError):
-                await _cleanup_request_resources(
-                    "req1", mock_task, mock_event, mock_future, False
-                )
+            await _cleanup_request_resources(
+                "req1", mock_task, mock_event, mock_future, False
+            )
 
 
 @pytest.mark.asyncio
@@ -1751,9 +1899,9 @@ class TestProcessRequestRefactoredExceptionHandling:
         ):
             # Exception in clear_stream_queue should be caught and logged
             # Processing should continue
-            mock_init.side_effect = Exception("Stop processing early")
+            mock_init.side_effect = RuntimeError("Stop processing early")
 
-            with pytest.raises(Exception):
+            with pytest.raises(RuntimeError):
                 await _process_request_refactored(
                     "req1", mock_request, mock_http_request, mock_future
                 )
@@ -1780,12 +1928,12 @@ class TestProcessRequestRefactoredExceptionHandling:
                 new_callable=AsyncMock,
                 side_effect=asyncio.CancelledError(),
             ),
+            pytest.raises(asyncio.CancelledError),
         ):
             # CancelledError should be re-raised
-            with pytest.raises(asyncio.CancelledError):
-                await _process_request_refactored(
-                    "req1", mock_request, mock_http_request, mock_future
-                )
+            await _process_request_refactored(
+                "req1", mock_request, mock_http_request, mock_future
+            )
 
     @pytest.mark.asyncio
     async def test_process_request_page_none_error(
@@ -1881,12 +2029,12 @@ class TestProcessRequestRefactoredExceptionHandling:
                 "api_utils.request_processor._cleanup_request_resources",
                 new_callable=AsyncMock,
             ),
+            pytest.raises(asyncio.CancelledError),
         ):
             # CancelledError should be caught, and re-raised
-            with pytest.raises(asyncio.CancelledError):
-                await _process_request_refactored(
-                    "req1", mock_request, mock_http_request, mock_future
-                )
+            await _process_request_refactored(
+                "req1", mock_request, mock_http_request, mock_future
+            )
 
     @pytest.mark.asyncio
     async def test_process_request_client_disconnected_error_handling(

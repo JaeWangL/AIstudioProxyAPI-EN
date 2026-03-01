@@ -8,7 +8,9 @@ import json
 import os
 import shutil
 from asyncio import Event, Future
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from collections.abc import Callable
+from contextlib import suppress
+from typing import Any, Optional, Union
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -98,6 +100,18 @@ from .utils_ext.validation import validate_chat_request
 
 _initialize_request_context = _init_request_context
 
+DisconnectChecker = Callable[..., Any]
+CompletionPayload = dict[str, Any]
+CompletionSignal = Optional[Union[Event, CompletionPayload]]
+ProcessorReturn = Optional[
+    tuple[CompletionSignal, Optional[Locator], DisconnectChecker]
+]
+ResponseProcessingReturn = Union[
+    tuple[Event, Optional[Locator], DisconnectChecker],
+    CompletionPayload,
+    None,
+]
+
 
 # Wrapper function for backward compatibility
 async def _test_client_connection(req_id: str, http_request) -> bool:
@@ -113,7 +127,7 @@ async def _analyze_model_requirements(
 
 
 async def _validate_page_status(
-    req_id: str, context: RequestContext, check_client_disconnected: Callable
+    req_id: str, context: RequestContext, check_client_disconnected: DisconnectChecker
 ) -> None:
     """Validate page status"""
     page = context["page"]
@@ -130,7 +144,9 @@ async def _validate_page_status(
 
 
 async def _handle_model_switching(
-    req_id: str, context: RequestContext, check_client_disconnected: Callable
+    req_id: str,
+    context: RequestContext,
+    check_client_disconnected: DisconnectChecker,
 ) -> RequestContext:
     """Proxy to model_switching.handle_model_switching"""
     return await ms_switch(req_id, context)
@@ -160,14 +176,14 @@ async def _handle_parameter_cache(req_id: str, context: RequestContext) -> None:
 async def _prepare_and_validate_request(
     req_id: str,
     request: ChatCompletionRequest,
-    check_client_disconnected: Callable,
+    check_client_disconnected: DisconnectChecker,
     fc_state: Optional[FunctionCallingState] = None,
-) -> Tuple[str, List[str], Optional[List[Dict[str, Any]]]]:
+) -> tuple[str, list[str], Optional[list[dict[str, Any]]]]:
     """Prepare and validate request, return (combined prompt, attachment path list, tool_exec_results)."""
     try:
         validate_chat_request(request.messages, req_id)
-    except ValueError as e:
-        raise bad_request(req_id, f"Invalid request: {e}")
+    except ValueError as err:
+        raise bad_request(req_id, f"Invalid request: {err}") from err
 
     prepared_prompt, attachments_list = prepare_combined_prompt(
         request.messages,
@@ -175,6 +191,7 @@ async def _prepare_and_validate_request(
         getattr(request, "tools", None),
         getattr(request, "tool_choice", None),
         fc_state=fc_state,
+        parallel_tool_calls=getattr(request, "parallel_tool_calls", True),
     )
     # Active function execution based on tools/tool_choice (supports per-request MCP endpoints)
     try:
@@ -220,12 +237,14 @@ async def _handle_response_processing(
     page: Optional[AsyncPage],
     context: RequestContext,
     result_future: Future,
-    submit_button_locator: Locator,
-    check_client_disconnected: Callable,
+    submit_button_locator: Optional[Locator],
+    check_client_disconnected: DisconnectChecker,
     prompt_length: int,
     timeout: float,
     silence_threshold: float = 60.0,
-) -> Optional[Tuple[Event, Locator, Callable]]:
+    prepared_prompt: str = "",
+    attachments_list: Optional[list] = None,
+) -> ResponseProcessingReturn:
     """Handle response generation"""
     stream_port = get_environment_variable("STREAM_PORT")
     use_stream = stream_port != "0"
@@ -240,6 +259,8 @@ async def _handle_response_processing(
             check_client_disconnected,
             timeout=timeout,
             silence_threshold=silence_threshold,
+            prepared_prompt=prepared_prompt,
+            attachments_list=attachments_list,
         )
     else:
         return await _handle_playwright_response(
@@ -260,11 +281,13 @@ async def _handle_auxiliary_stream_response(
     request: ChatCompletionRequest,
     context: RequestContext,
     result_future: Future[Union[StreamingResponse, JSONResponse]],
-    submit_button_locator: Locator,
-    check_client_disconnected: Callable,
+    submit_button_locator: Optional[Locator],
+    check_client_disconnected: DisconnectChecker,
     timeout: float,
     silence_threshold: float = 60.0,
-) -> Optional[Tuple[Event, Locator, Callable]]:
+    prepared_prompt: str = "",
+    attachments_list: Optional[list] = None,
+) -> ResponseProcessingReturn:
     """Auxiliary stream response processing path"""
     from api_utils.server_state import state
 
@@ -274,6 +297,7 @@ async def _handle_auxiliary_stream_response(
     current_ai_studio_model_id = context.get("current_ai_studio_model_id")
 
     if is_streaming:
+        completion_event: Optional[Event] = None
         try:
             completion_event = Event()
             page = context["page"]
@@ -291,11 +315,60 @@ async def _handle_auxiliary_stream_response(
                     page=page,  # <--- CRITICAL: This enables the auto-scroll logic in stream.py
                 )
 
+            async def resubmit_prompt_for_retry() -> bool:
+                """Re-submit the original prompt after a successful auth rotation."""
+                from api_utils.server_state import state as server_state
+                from api_utils.utils_ext.stream import clear_stream_queue
+
+                retry_page = server_state.page_instance or context.get("page")
+                if not retry_page or retry_page.is_closed():
+                    logger.error(
+                        f"[{req_id}] [ROTATION-RETRY-SUBMIT] page unavailable for retry submission"
+                    )
+                    return False
+
+                if not prepared_prompt:
+                    logger.error(
+                        f"[{req_id}] [ROTATION-RETRY-SUBMIT] prepared prompt missing; cannot re-submit"
+                    )
+                    return False
+
+                retry_attachments = attachments_list or []
+
+                # Drop stale queue packets from the failed attempt before replay.
+                try:
+                    await clear_stream_queue()
+                except Exception as clear_err:
+                    logger.debug(
+                        f"[{req_id}] [ROTATION-RETRY-SUBMIT] clear_stream_queue warning: {clear_err}"
+                    )
+
+                try:
+                    check_client_disconnected(
+                        f"[{req_id}] Before retry prompt re-submission"
+                    )
+                except Exception as disco_err:
+                    logger.warning(
+                        f"[{req_id}] [ROTATION-RETRY-SUBMIT] client disconnected before retry submit: {disco_err}"
+                    )
+                    return False
+
+                # Rebind context/page and submit prompt again.
+                context["page"] = retry_page
+                retry_page_controller = PageController(retry_page, logger, req_id)
+                await retry_page_controller.submit_prompt(
+                    prepared_prompt,
+                    retry_attachments,
+                    check_client_disconnected,
+                )
+                return True
+
             resilient_gen = resilient_stream_generator(
                 req_id,
                 current_ai_studio_model_id or MODEL_NAME,
                 aux_stream_factory,
                 completion_event,
+                before_retry_callback=resubmit_prompt_for_retry,
             )
 
             if not result_future.done():
@@ -390,6 +463,39 @@ async def _handle_auxiliary_stream_response(
 
         model_name_for_json = current_ai_studio_model_id or MODEL_NAME
 
+        # Sanitize emulated function-call text for non-streaming mode as well.
+        from .response_generators import (
+            _apply_parallel_tool_call_policy,
+            _clean_body_text,
+            _normalize_function_calls,
+            _recover_function_calls_from_emulated_text,
+            _strip_emulated_function_call_text,
+        )
+
+        raw_reasoning = str(reasoning_content or "")
+        raw_content = _clean_body_text(str(content or ""))
+
+        reasoning_content = _strip_emulated_function_call_text(raw_reasoning)
+        content = _strip_emulated_function_call_text(raw_content)
+
+        normalized_functions = _normalize_function_calls(list(functions or []))
+        if not normalized_functions:
+            if reasoning_content != raw_reasoning:
+                normalized_functions = _recover_function_calls_from_emulated_text(
+                    raw_reasoning
+                )
+            if not normalized_functions and content != raw_content:
+                normalized_functions = _recover_function_calls_from_emulated_text(
+                    raw_content
+                )
+
+        functions = _apply_parallel_tool_call_policy(
+            normalized_functions,
+            getattr(request, "parallel_tool_calls", True),
+            req_id,
+            logger,
+        )
+
         # Consolidate reasoning content with body content
         consolidated_content = ""
         if reasoning_content and reasoning_content.strip():
@@ -403,7 +509,7 @@ async def _handle_auxiliary_stream_response(
         finish_reason_val = "stop"
 
         if functions and len(functions) > 0:
-            tool_calls_list: List[Dict[str, Any]] = []
+            tool_calls_list: list[dict[str, Any]] = []
             for func_idx, function_call_data in enumerate(functions):
                 tool_calls_list.append(
                     {
@@ -485,11 +591,11 @@ async def _handle_playwright_response(
     page: AsyncPage,
     context: dict,
     result_future: Future,
-    submit_button_locator: Locator,
-    check_client_disconnected: Callable,
+    submit_button_locator: Optional[Locator],
+    check_client_disconnected: DisconnectChecker,
     prompt_length: int,
     timeout: float,
-) -> Optional[Tuple[Event, Locator, Callable]]:
+) -> ResponseProcessingReturn:
     """Handle response using Playwright - Enhanced version with integrity verification"""
     from api_utils.server_state import state
 
@@ -591,10 +697,25 @@ async def _handle_playwright_response(
                 get_function_calling_orchestrator,
             )
 
+            from .response_generators import (
+                _apply_parallel_tool_call_policy,
+                _normalize_function_calls,
+            )
+
+            normalized_calls = _normalize_function_calls(
+                list(response_data.get("function_calls", []))
+            )
+            normalized_calls = _apply_parallel_tool_call_policy(
+                normalized_calls,
+                getattr(request, "parallel_tool_calls", True),
+                req_id,
+                logger,
+            )
+
             orchestrator = get_function_calling_orchestrator()
             message_payload, finish_reason_val = (
                 orchestrator.format_function_calls_for_response(
-                    response_data.get("function_calls", []), consolidated_content
+                    normalized_calls, consolidated_content
                 )
             )
         else:
@@ -654,10 +775,8 @@ async def _cleanup_request_resources(
 
     if disconnect_check_task and not disconnect_check_task.done():
         disconnect_check_task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await disconnect_check_task
-        except asyncio.CancelledError:
-            pass
 
     # Clean up upload subdirectory
     try:
@@ -687,7 +806,7 @@ async def process_request_with_retry(
     request: ChatCompletionRequest,
     http_request: Request,
     result_future: Future,
-) -> Optional[Tuple[Event, Locator, Callable[[str], bool]]]:
+) -> ProcessorReturn:
     """Wrapper around _process_request_refactored with retry mechanism for quota"""
     from api_utils.server_state import state
 
@@ -717,7 +836,7 @@ async def process_request(
     request: ChatCompletionRequest,
     http_request: Request,
     result_future: Future,
-) -> Optional[Tuple[Event, Locator, Callable[[str], bool]]]:
+) -> ProcessorReturn:
     """Main entry point for request processing"""
     return await process_request_with_retry(
         req_id, request, http_request, result_future
@@ -729,7 +848,7 @@ async def _process_request_refactored(
     request: ChatCompletionRequest,
     http_request: Request,
     result_future: Future,
-) -> Optional[Tuple[Event, Locator, Callable[[str], bool]]]:
+) -> ProcessorReturn:
     """Core Request Processing Function - Refactored Version"""
     from api_utils.server_state import state
 
@@ -809,6 +928,7 @@ async def _process_request_refactored(
                     page_controller=page_controller,
                     check_client_disconnected=check_client_disconnected,
                     req_id=req_id,
+                    parallel_tool_calls=getattr(request, "parallel_tool_calls", True),
                 )
             except Exception as fc_err:
                 logger.warning(
@@ -921,6 +1041,8 @@ async def _process_request_refactored(
             len(prepared_prompt),
             timeout=dynamic_timeout,
             silence_threshold=dynamic_silence_threshold,
+            prepared_prompt=prepared_prompt,
+            attachments_list=attachments_list,
         )
 
         if response_result:

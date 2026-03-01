@@ -44,83 +44,28 @@ _STATIC_EMULATED_PARAMS_PATTERN = re.compile(
     r"Parameters:\s*\n?\s*(\{[\s\S]*?\})\s*(?:\n\n|\Z|(?=Request\s+function\s+call:))",
     re.IGNORECASE,
 )
-_STATIC_EMULATED_PARAMS_PATTERN = re.compile(
-    r"Parameters:\s*\n?\s*(\{[\s\S]*?\})\s*(?:\n\n|\Z|(?=Request\s+function\s+call:))",
-    re.IGNORECASE,
-)
 
 
 def parse_emulated_function_calls_static(text: str) -> List[Any]:
-    """Static function to parse emulated text-based function calls without page instance.
+    """Parse emulated text-based function calls without requiring a page instance.
 
-    Handles the format:
-        Request function call: <function_name>
-        Parameters:
-        {
-          "key": "value",
-          ...
-        }
-
-    This is useful for recovering function calls in response_generators.py
-    when the DOM-based detection fails due to timing issues.
-
-    Args:
-        text: The text content to parse.
-
-    Returns:
-        List of ParsedFunctionCall objects.
+    This intentionally reuses the class parser implementation so static recovery
+    follows the exact same parsing/validation rules as DOM fallback parsing.
     """
-    calls: List[Any] = []
-
     if not text or "Request function call:" not in text:
-        return calls
+        return []
 
     try:
-        # Split by "Request function call:" to handle multiple calls
-        parts = re.split(r"(?=Request\s+function\s+call:)", text, flags=re.IGNORECASE)
-
-        for part in parts:
-            if not part.strip():
-                continue
-
-            # Extract function name
-            name_match = _STATIC_EMULATED_FC_PATTERN.search(part)
-            if not name_match:
-                continue
-
-            function_name = name_match.group(1).strip()
-
-            # Strip common prefixes like "default_api_"
-            if function_name.startswith("default_api_"):
-                function_name = function_name[len("default_api_") :]
-
-            # Extract parameters
-            arguments: Dict[str, Any] = {}
-            params_match = _STATIC_EMULATED_PARAMS_PATTERN.search(part)
-            if params_match:
-                try:
-                    json_str = params_match.group(1)
-                    # Clean control characters
-                    json_str = re.sub(r"<ctrl\d+>", "", json_str)
-                    arguments = json.loads(json_str)
-                except (json.JSONDecodeError, Exception):
-                    pass
-
-            call = _create_parsed_call(
-                name=function_name,
-                arguments=arguments,
-                raw_text=part[:200],
-            )
-            calls.append(call)
-
+        parser = FunctionCallResponseParser(
+            page=None,  # type: ignore[arg-type]
+            logger=logger,
+            req_id="static",
+        )
+        return parser._parse_emulated_function_calls(text)
     except Exception as e:
         if FUNCTION_CALLING_DEBUG:
             logger.debug(f"Static emulated FC parsing error: {e}")
-
-    # Validate and potentially correct function names using fuzzy matching
-    calls = _validate_function_names(calls)
-
-    return calls
+        return []
 
 
 def _validate_function_names(calls: List[Any]) -> List[Any]:
@@ -736,6 +681,28 @@ class FunctionCallResponseParser:
                     # Extract parameters from "Parameters:" block
                     arguments = self._extract_emulated_params(part)
 
+                has_parameter_marker = has_inline_params or (
+                    "parameters:" in part.lower()
+                )
+                has_explicit_empty_params = self._has_explicit_empty_emulated_params(
+                    part, has_inline_params
+                )
+
+                # Guardrail: if a params section exists but parsing produced an empty
+                # dict, treat it as malformed/incomplete and skip this call. This avoids
+                # emitting inconsistent tool calls like write({}) when arguments failed
+                # to parse from emulated text.
+                if (
+                    has_parameter_marker
+                    and not arguments
+                    and not has_explicit_empty_params
+                ):
+                    if FUNCTION_CALLING_DEBUG:
+                        self.logger.debug(
+                            f"[{self.req_id}] Skipping emulated function call due to malformed params"
+                        )
+                    continue
+
                 if function_name:
                     # Clean up function name (remove any trailing colons, etc.)
                     function_name = function_name.rstrip(":").strip()
@@ -771,39 +738,40 @@ class FunctionCallResponseParser:
 
         return calls
 
+    def _has_explicit_empty_emulated_params(
+        self, text: str, has_inline_params: bool
+    ) -> bool:
+        """Check whether emulated call explicitly provided an empty params object."""
+        if has_inline_params:
+            return bool(re.search(r"\{\s*\}", text))
+
+        return bool(
+            re.search(r"Parameters:\s*\n?\s*\{\s*\}", text, re.IGNORECASE)
+        )
+
     def _extract_emulated_params(self, text: str) -> Dict[str, Any]:
         """Extract parameters from emulated function call text.
 
-        Handles the "Parameters:" block with JSON content.
-
-        Args:
-            text: Text containing the Parameters block.
-
-        Returns:
-            Parsed arguments dictionary.
+        Handles the "Parameters:" block with both strict JSON and common
+        JSON-like variants produced by model text output.
         """
         arguments: Dict[str, Any] = {}
 
-        # Try the dedicated params pattern first
+        # Try the dedicated params pattern first.
         params_match = self.EMULATED_PARAMS_PATTERN.search(text)
         if params_match:
             params_text = params_match.group(1)
-            try:
-                arguments = json.loads(params_text)
-                if isinstance(arguments, dict):
-                    return arguments
-            except json.JSONDecodeError:
-                pass
+            parsed = self._try_parse_emulated_params_object(params_text)
+            if parsed is not None:
+                return parsed
 
-        # Fallback: Find JSON object after "Parameters:"
+        # Fallback: Find object block after "Parameters:" and parse it.
         params_idx = text.lower().find("parameters:")
         if params_idx != -1:
             after_params = text[params_idx + len("parameters:") :]
 
-            # Find the first { and extract the JSON object
             brace_start = after_params.find("{")
             if brace_start != -1:
-                # Count braces to find the matching closing brace
                 brace_count = 0
                 json_end = 0
                 for i, char in enumerate(after_params[brace_start:]):
@@ -817,21 +785,52 @@ class FunctionCallResponseParser:
 
                 if json_end > 0:
                     json_str = after_params[brace_start:json_end]
-                    try:
-                        arguments = json.loads(json_str)
-                        if isinstance(arguments, dict):
-                            return arguments
-                    except json.JSONDecodeError:
-                        # Try to clean up the JSON string
-                        cleaned = self._clean_json_string(json_str)
-                        try:
-                            arguments = json.loads(cleaned)
-                            if isinstance(arguments, dict):
-                                return arguments
-                        except json.JSONDecodeError:
-                            pass
+                    parsed = self._try_parse_emulated_params_object(json_str)
+                    if parsed is not None:
+                        return parsed
 
         return arguments
+
+    def _try_parse_emulated_params_object(
+        self, raw_params: str
+    ) -> Optional[Dict[str, Any]]:
+        """Attempt to parse a JSON-like params object into a dict.
+
+        Returns None when parsing fails.
+        """
+        if not raw_params:
+            return None
+
+        parse_candidates = [raw_params]
+
+        cleaned = self._clean_json_string(raw_params)
+        if cleaned != raw_params:
+            parse_candidates.append(cleaned)
+
+        # Common model output: unquoted object keys, e.g. {path: "x"}
+        js_like = re.sub(r"(\{|\[|,)\s*(\w+)\s*:", r'\1"\2":', cleaned)
+        if js_like not in parse_candidates:
+            parse_candidates.append(js_like)
+
+        # Common model output: <ctrlNN> used as string delimiters
+        ctrl_delimited = re.sub(r"<ctrl\d+>", '"', raw_params)
+        if ctrl_delimited not in parse_candidates:
+            parse_candidates.append(ctrl_delimited)
+
+        for candidate in parse_candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+        # Last fallback: permissive key/value extraction for simple objects.
+        extracted = self._parse_arguments(raw_params)
+        if isinstance(extracted, dict) and extracted:
+            return extracted
+
+        return None
 
     def _clean_json_string(self, json_str: str) -> str:
         """Clean up a potentially malformed JSON string.
