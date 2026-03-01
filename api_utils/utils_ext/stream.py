@@ -3,7 +3,9 @@ import json
 import queue
 import re
 import time
-from typing import Any, AsyncGenerator, Callable, List, Optional, Tuple
+from collections.abc import AsyncGenerator, Callable
+from contextlib import suppress
+from typing import Any, Optional
 
 from config.settings import FUNCTION_CALLING_DEBUG
 from logging_utils import set_request_id
@@ -67,6 +69,14 @@ async def use_stream_response(
     max_empty_retries = max(silence_wait_limit, initial_wait_limit)
     hard_timeout_limit = int(timeout * 10 * 3)
 
+    # Guardrail: after a successful auth rotation, if a retried stream still receives
+    # no packets for too long, fail fast instead of waiting the full dynamic timeout.
+    post_rotation_ttfb_limit = min(initial_wait_limit, 300)  # 30s max
+
+    # Prevent unbounded "UI active" snoozing loops near timeout thresholds.
+    ui_snooze_count = 0
+    max_ui_snoozes = 2
+
     _data_received = False
     has_content = False
     has_seen_functions = False
@@ -102,10 +112,7 @@ async def use_stream_response(
 
     try:
         while True:
-            if (
-                GlobalState.CURRENT_STREAM_REQ_ID
-                and GlobalState.CURRENT_STREAM_REQ_ID != req_id
-            ):
+            if GlobalState.CURRENT_STREAM_REQ_ID and req_id != GlobalState.CURRENT_STREAM_REQ_ID:
                 logger.warning(f"[{req_id}] Zombie Stream detected. Terminating.")
                 yield {
                     "done": True,
@@ -116,7 +123,7 @@ async def use_stream_response(
                 return
 
             if page:
-                try:
+                with suppress(Exception):
                     await page.evaluate(
                         """([scrollSel, contentSel, lastTurnSel]) => {
                         const scrollContainer = document.querySelector(scrollSel);
@@ -133,8 +140,6 @@ async def use_stream_response(
                             LAST_CHAT_TURN_SELECTOR,
                         ],
                     )
-                except Exception:
-                    pass
 
             if GlobalState.IS_QUOTA_EXCEEDED and not GlobalState.IS_RECOVERING:
                 logger.warning(f"[{req_id}] Quota detected. Pausing...")
@@ -191,7 +196,27 @@ async def use_stream_response(
                             and "ts" in parsed_wrapper
                             and "data" in parsed_wrapper
                         ):
-                            if parsed_wrapper["ts"] < stream_start_time:
+                            packet_ts: Optional[float] = None
+                            try:
+                                packet_ts = float(parsed_wrapper.get("ts"))
+                            except (TypeError, ValueError):
+                                packet_ts = None
+
+                            # Drop stale packets that were emitted before the most
+                            # recent successful auth rotation. This protects retried
+                            # streams from old DONE/error packets still arriving from
+                            # the pre-rotation request.
+                            if (
+                                packet_ts is not None
+                                and GlobalState.LAST_ROTATION_TIMESTAMP > 0
+                                and packet_ts < (GlobalState.LAST_ROTATION_TIMESTAMP - 0.25)
+                            ):
+                                logger.warning(
+                                    f"[{req_id}] 🗑️ Ignored pre-rotation packet (ts={packet_ts:.3f} < rot={GlobalState.LAST_ROTATION_TIMESTAMP:.3f})."
+                                )
+                                continue
+
+                            if packet_ts is not None and packet_ts < stream_start_time:
                                 logger.warning(f"[{req_id}] 🗑️ Stale data ignored.")
                                 continue
                             actual_data = parsed_wrapper["data"]
@@ -337,8 +362,10 @@ async def use_stream_response(
                             parsed_data["function"] = dom_functions
                             has_seen_functions = True
 
-                        # If we have DOM text and accumulated body is empty, inject it to final chunk
-                        if dom_text and not accumulated_body:
+                        # Inject DOM text only when no function calls are present.
+                        # If function calls were detected, adding DOM text can leak
+                        # internal planning/prompt artifacts in tool-call responses.
+                        if dom_text and not accumulated_body and not dom_functions:
                             parsed_data["body"] = dom_text
                             accumulated_body = dom_text
 
@@ -399,13 +426,21 @@ async def use_stream_response(
                     if GlobalState.IS_RECOVERING:
                         empty_count = 0
                         continue
-                    if (
-                        await check_ui_generation_active()
-                        and empty_count < hard_timeout_limit
-                    ):
-                        logger.warning(f"[{req_id}] Timeout but UI active. Snoozing...")
-                        empty_count = max(0, empty_count - int(max_empty_retries * 0.5))
-                        continue
+
+                    ui_active = await check_ui_generation_active()
+                    if ui_active and empty_count < hard_timeout_limit:
+                        if ui_snooze_count < max_ui_snoozes:
+                            ui_snooze_count += 1
+                            logger.warning(
+                                f"[{req_id}] Timeout but UI active. Snoozing... ({ui_snooze_count}/{max_ui_snoozes})"
+                            )
+                            empty_count = max(
+                                0, empty_count - int(max_empty_retries * 0.5)
+                            )
+                            continue
+                        logger.warning(
+                            f"[{req_id}] UI remained active after {max_ui_snoozes} snoozes; forcing timeout handling"
+                        )
                     elif empty_count >= hard_timeout_limit:
                         logger.error(f"[{req_id}] HARD TIMEOUT REACHED!")
                         yield {
@@ -415,6 +450,7 @@ async def use_stream_response(
                             "function": [],
                         }
                         return
+
                     yield {
                         "done": True,
                         "reason": "internal_timeout",
@@ -422,28 +458,46 @@ async def use_stream_response(
                         "function": [],
                     }
                     return
+
                 if check_client_disconnected:
                     try:
                         check_client_disconnected(f"Stream Queue Wait ({req_id})")
                     except ClientDisconnectedError:
                         raise
-                if received_items_count == 0 and empty_count >= initial_wait_limit:
-                    logger.error(f"[{req_id}] Stream has no data (TTFB Timeout).")
-                    try:
-                        from api_utils.server_state import state
 
-                        page_instance = state.page_instance
-                        if page_instance:
-                            await page_instance.reload()
-                    except Exception:
-                        pass
-                    yield {
-                        "done": True,
-                        "reason": "ttfb_timeout",
-                        "body": "",
-                        "function": [],
-                    }
-                    return
+                if received_items_count == 0:
+                    recently_rotated = (
+                        time.time() - GlobalState.LAST_ROTATION_TIMESTAMP < 90.0
+                    )
+                    if recently_rotated and empty_count >= post_rotation_ttfb_limit:
+                        logger.error(
+                            f"[{req_id}] Stream has no data after rotation (TTFB Timeout)."
+                        )
+                        yield {
+                            "done": True,
+                            "reason": "ttfb_timeout",
+                            "body": "",
+                            "function": [],
+                        }
+                        return
+
+                    if empty_count >= initial_wait_limit:
+                        logger.error(f"[{req_id}] Stream has no data (TTFB Timeout).")
+                        try:
+                            from api_utils.server_state import state
+
+                            page_instance = state.page_instance
+                            if page_instance:
+                                await page_instance.reload()
+                        except Exception:
+                            pass
+                        yield {
+                            "done": True,
+                            "reason": "ttfb_timeout",
+                            "body": "",
+                            "function": [],
+                        }
+                        return
                 if empty_count - last_ui_check_time >= ui_check_interval:
                     if await check_ui_generation_active():
                         logger.info(f"[{req_id}] UI detected still generating...")
@@ -491,7 +545,7 @@ async def detect_function_calls_from_dom(
     page: Any,
     req_id: str,
     logger: Any,
-) -> Tuple[List[dict], str]:
+) -> tuple[list[dict], str]:
     """Fallback function call detection using DOM parsing.
 
     This is used when the network interceptor doesn't capture function calls
@@ -516,7 +570,7 @@ async def detect_function_calls_from_dom(
         parser = FunctionCallResponseParser(page, logger, req_id)
         result = await parser.parse_function_calls()
 
-        function_calls: List[dict] = []
+        function_calls: list[dict] = []
         if result.has_function_calls and result.function_calls:
             # Convert ParsedFunctionCall objects to dict format expected by stream
             for fc in result.function_calls:

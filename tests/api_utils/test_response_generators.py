@@ -22,8 +22,50 @@ import pytest
 from api_utils.response_generators import (
     gen_sse_from_aux_stream,
     gen_sse_from_playwright,
+    resilient_stream_generator,
 )
-from models import ChatCompletionRequest, ClientDisconnectedError
+from models import ChatCompletionRequest, ClientDisconnectedError, QuotaExceededError
+
+
+@pytest.mark.asyncio
+async def test_resilient_stream_updates_rotation_timestamp_on_successful_rotation():
+    """Successful auth rotation during resilient retry should stamp LAST_ROTATION_TIMESTAMP."""
+    from config.global_state import GlobalState
+
+    req_id = "test-resilient-rotation-ts"
+    completion_event = asyncio.Event()
+    prev_ts = GlobalState.LAST_ROTATION_TIMESTAMP
+
+    first_attempt = True
+
+    def generator_factory(_event):
+        nonlocal first_attempt
+
+        async def gen_quota():
+            raise QuotaExceededError("quota")
+            yield ""  # pragma: no cover
+
+        async def gen_success():
+            yield "data: ok\n\n"
+
+        if first_attempt:
+            first_attempt = False
+            return gen_quota()
+        return gen_success()
+
+    with patch("browser_utils.auth_rotation.perform_auth_rotation", new=AsyncMock(return_value=True)):
+        chunks = []
+        async for chunk in resilient_stream_generator(
+            req_id,
+            "gemini-3.1-pro-preview",
+            generator_factory,
+            completion_event,
+        ):
+            chunks.append(chunk)
+
+    assert any("data: ok" in c for c in chunks)
+    assert prev_ts <= GlobalState.LAST_ROTATION_TIMESTAMP
+    assert completion_event.is_set()
 
 
 class TestGenSSEFromAuxStream:
@@ -208,6 +250,198 @@ class TestGenSSEFromAuxStream:
             if "[DONE]" not in c and "data: " in c
         ]
         assert "tool_calls" in finish_reasons
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_stream_parallel_disabled_keeps_first_only(
+        self, make_chat_request
+    ):
+        """When parallel_tool_calls is false, only the first tool call is streamed."""
+        req_id = "test-req-tools-no-parallel"
+        request = make_chat_request(stream=True, parallel_tool_calls=False)
+        completion_event = asyncio.Event()
+        check_disconnect = MagicMock()
+
+        function_data = [
+            {"name": "get_weather", "params": {"location": "New York"}},
+            {"name": "get_time", "params": {"timezone": "UTC"}},
+        ]
+
+        stream_data = [
+            {"body": "", "reason": "", "done": True, "function": function_data}
+        ]
+
+        async def mock_stream_gen(*args, **kwargs):
+            for item in stream_data:
+                yield item
+
+        with (
+            patch(
+                "api_utils.response_generators.use_stream_response",
+                side_effect=mock_stream_gen,
+            ),
+            patch(
+                "api_utils.response_generators.calculate_usage_stats",
+                return_value={"total_tokens": 5},
+            ),
+            patch("api_utils.response_generators.random_id", return_value="tool-123"),
+        ):
+            chunks = []
+            async for chunk in gen_sse_from_aux_stream(
+                req_id,
+                request,
+                "gemini-1.5-pro",
+                check_disconnect,
+                completion_event,
+                30.0,
+            ):
+                chunks.append(chunk)
+
+        tool_chunk = None
+        for chunk in chunks:
+            if "[DONE]" in chunk:
+                continue
+            data = json.loads(chunk.replace("data: ", "").strip())
+            delta = data["choices"][0].get("delta", {})
+            if "tool_calls" in delta:
+                tool_chunk = delta["tool_calls"]
+                break
+
+        assert tool_chunk is not None
+        assert len(tool_chunk) == 1
+        assert tool_chunk[0]["function"]["name"] == "get_weather"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_function_call_text_is_filtered(self, make_chat_request):
+        """Function-call instruction text in reasoning must not leak to clients."""
+        req_id = "test-req-reasoning-fc-filter"
+        request = make_chat_request(stream=True)
+        completion_event = asyncio.Event()
+        check_disconnect = MagicMock()
+
+        leaked_reasoning = (
+            "Planning next step...\n"
+            "Request function call: bash\n"
+            'Parameters:\n{"command":"echo hello"}'
+        )
+
+        stream_data = [
+            {"reason": leaked_reasoning, "body": "", "done": False, "function": []},
+            {
+                "reason": leaked_reasoning,
+                "body": "",
+                "done": True,
+                "function": [{"name": "bash", "params": {"command": "echo hello"}}],
+            },
+        ]
+
+        async def mock_stream_gen(*args, **kwargs):
+            for item in stream_data:
+                yield item
+
+        with (
+            patch(
+                "api_utils.response_generators.use_stream_response",
+                side_effect=mock_stream_gen,
+            ),
+            patch(
+                "api_utils.response_generators.calculate_usage_stats",
+                return_value={"total_tokens": 5},
+            ),
+            patch("api_utils.response_generators.random_id", return_value="tool-xyz"),
+        ):
+            chunks = []
+            async for chunk in gen_sse_from_aux_stream(
+                req_id,
+                request,
+                "gemini-1.5-pro",
+                check_disconnect,
+                completion_event,
+                30.0,
+            ):
+                chunks.append(chunk)
+
+        reasoning_deltas = []
+        tool_chunks = []
+        for chunk in chunks:
+            if "[DONE]" in chunk:
+                continue
+            data = json.loads(chunk.replace("data: ", "").strip())
+            delta = data["choices"][0].get("delta", {})
+            if "reasoning_content" in delta:
+                reasoning_deltas.append(delta["reasoning_content"])
+            if "tool_calls" in delta:
+                tool_chunks.append(delta["tool_calls"])
+
+        # Text should be suppressed once tool-call content is detected/recovered.
+        assert "Request function call" not in "".join(reasoning_deltas)
+        assert tool_chunks
+        assert tool_chunks[0][0]["function"]["name"] == "bash"
+
+    @pytest.mark.asyncio
+    async def test_done_chunk_with_tool_calls_suppresses_text_leak(self, make_chat_request):
+        """Final done chunk containing tool_calls must not emit new content/reasoning deltas."""
+        req_id = "test-req-done-fc-no-text"
+        request = make_chat_request(stream=True)
+        completion_event = asyncio.Event()
+        check_disconnect = MagicMock()
+
+        stream_data = [
+            {
+                "reason": "Developer: internal instructions",
+                "body": "Developer: internal instructions",
+                "done": True,
+                "function": [{"name": "write", "params": {"path": "x", "content": "y"}}],
+            }
+        ]
+
+        async def mock_stream_gen(*args, **kwargs):
+            for item in stream_data:
+                yield item
+
+        with (
+            patch(
+                "api_utils.response_generators.use_stream_response",
+                side_effect=mock_stream_gen,
+            ),
+            patch(
+                "api_utils.response_generators.calculate_usage_stats",
+                return_value={"total_tokens": 5},
+            ),
+            patch("api_utils.response_generators.random_id", return_value="tool-safe"),
+        ):
+            chunks = []
+            async for chunk in gen_sse_from_aux_stream(
+                req_id,
+                request,
+                "gemini-1.5-pro",
+                check_disconnect,
+                completion_event,
+                30.0,
+            ):
+                chunks.append(chunk)
+
+        seen_tool_calls = False
+        leaked_text = ""
+
+        for chunk in chunks:
+            if "[DONE]" in chunk:
+                continue
+            data = json.loads(chunk.replace("data: ", "").strip())
+            delta = data["choices"][0].get("delta", {})
+
+            if "tool_calls" in delta:
+                seen_tool_calls = True
+                assert delta["tool_calls"][0]["function"]["name"] == "write"
+
+            if "content" in delta and isinstance(delta.get("content"), str):
+                leaked_text += delta["content"]
+            if "reasoning_content" in delta and isinstance(
+                delta.get("reasoning_content"), str
+            ):
+                leaked_text += delta["reasoning_content"]
+
+        assert seen_tool_calls
+        assert "Developer: internal instructions" not in leaked_text
 
     @pytest.mark.asyncio
     async def test_client_disconnect_handling(self, make_chat_request):

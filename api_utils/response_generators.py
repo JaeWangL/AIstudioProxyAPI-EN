@@ -5,13 +5,15 @@ import random
 import re
 import time
 from asyncio import Event
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, cast
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Any, Optional, cast
 
 from playwright.async_api import Page as AsyncPage
 
 from api_utils.utils_ext.usage_tracker import increment_profile_usage
 from config import CHAT_COMPLETION_ID_PREFIX
 from config.global_state import GlobalState
+from config.settings import FUNCTION_CALLING_DEBUG
 from logging_utils import set_request_id
 from models import (
     ChatCompletionRequest,
@@ -25,16 +27,22 @@ from .sse import generate_sse_chunk, generate_sse_stop_chunk
 from .utils_ext.stream import use_stream_response
 from .utils_ext.tokens import calculate_usage_stats
 
-# Pattern to strip emulated function call text from body content
-# This prevents "Request function call: ..." from being sent as text content
+# Pattern to strip emulated function call text from streamed content.
+# This prevents "Request function call: ..." blocks from leaking as assistant text.
 _FUNCTION_CALL_TEXT_PATTERN = re.compile(
     r"Request\s+function\s+call:\s*[^\n]+(?:\n(?:Parameters:\s*)?\s*\{[\s\S]*?\})?",
     re.IGNORECASE,
 )
 
-# Pattern to strip control characters like <ctrl46> from body content
-# These appear in AI Studio's wire format as string delimiters
-# Also captures trailing } or { that may follow control chars (JSON leak artifacts)
+# Fallback marker for incomplete/truncated function call blocks in cumulative streams.
+_FUNCTION_CALL_START_PATTERN = re.compile(
+    r"Request\s+function\s+call\s*:",
+    re.IGNORECASE,
+)
+
+# Pattern to strip control characters like <ctrl46> from body content.
+# These appear in AI Studio's wire format as string delimiters.
+# Also captures trailing } or { that may follow control chars (JSON leak artifacts).
 _CONTROL_CHAR_PATTERN = re.compile(r"<ctrl\d+>[\}\{]?")
 
 
@@ -45,11 +53,94 @@ def _clean_body_text(body: str) -> str:
     return _CONTROL_CHAR_PATTERN.sub("", body)
 
 
+def _strip_emulated_function_call_text(text: str) -> str:
+    """Strip emulated function-call instruction text from response content.
+
+    Handles both complete blocks ("Request function call...Parameters...") and
+    partial/incomplete blocks by truncating at the first function-call marker.
+    """
+    if not text:
+        return text
+
+    cleaned = _FUNCTION_CALL_TEXT_PATTERN.sub("", text)
+    marker_match = _FUNCTION_CALL_START_PATTERN.search(cleaned)
+    if marker_match:
+        cleaned = cleaned[: marker_match.start()]
+
+    return cleaned.strip()
+
+
+def _normalize_function_calls(function_calls: list[Any]) -> list[dict[str, Any]]:
+    """Normalize parsed function call objects to dict format used by SSE output."""
+    normalized: list[dict[str, Any]] = []
+
+    for call in function_calls:
+        name: Optional[str] = None
+        params: Any = {}
+
+        if isinstance(call, dict):
+            raw_name = call.get("name")
+            if isinstance(raw_name, str):
+                name = raw_name
+            params = call.get("params") or call.get("arguments") or {}
+        else:
+            raw_name = getattr(call, "name", None)
+            if isinstance(raw_name, str):
+                name = raw_name
+            params = getattr(call, "arguments", None) or getattr(call, "params", {})
+
+        if not name:
+            continue
+
+        if not isinstance(params, dict):
+            params = {}
+
+        normalized.append({"name": name, "params": params})
+
+    return normalized
+
+
+def _recover_function_calls_from_emulated_text(text: str) -> list[dict[str, Any]]:
+    """Recover function calls from emulated text blocks in content/reasoning."""
+    if not text or "Request function call:" not in text:
+        return []
+
+    try:
+        from api_utils.utils_ext.function_call_response_parser import (
+            parse_emulated_function_calls_static,
+        )
+
+        parsed_calls = parse_emulated_function_calls_static(text)
+        return _normalize_function_calls(parsed_calls)
+    except Exception:
+        return []
+
+
+def _apply_parallel_tool_call_policy(
+    function_calls: list[dict[str, Any]],
+    parallel_tool_calls: Optional[bool],
+    req_id: str,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Apply parallel_tool_calls policy to normalized function call list."""
+    if not function_calls:
+        return function_calls
+
+    if parallel_tool_calls is False and len(function_calls) > 1:
+        logger.info(
+            f"[{req_id}] parallel_tool_calls=false; trimming {len(function_calls)} tool calls to 1"
+        )
+        return [function_calls[0]]
+
+    return function_calls
+
+
 async def resilient_stream_generator(
     req_id: str,
     model_name: str,
     generator_factory: Callable[[Event], AsyncGenerator[str, None]],
     completion_event: Event,
+    before_retry_callback: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Wraps a stream generator with resiliency logic.
@@ -58,7 +149,10 @@ async def resilient_stream_generator(
     from api_utils.server_state import state
 
     logger = state.logger
-    from browser_utils.auth_rotation import perform_auth_rotation
+    from browser_utils.auth_rotation import (
+        perform_auth_rotation,
+        verify_post_rotation_page_ready,
+    )
 
     max_retries = 3
     retry_count = 0
@@ -94,10 +188,25 @@ async def resilient_stream_generator(
                     perform_auth_rotation(target_model_id=model_name)
                 )
 
+                rotation_timeout_seconds = 180
                 rotation_start = time.time()
                 while not rotation_task.done():
-                    if time.time() - rotation_start > 120:
-                        logger.error(f"[{req_id}] Rotation timed out.")
+                    if time.time() - rotation_start > rotation_timeout_seconds:
+                        logger.error(
+                            f"[{req_id}] Rotation timed out after {rotation_timeout_seconds}s. Cancelling rotation task."
+                        )
+                        rotation_task.cancel()
+                        try:
+                            await asyncio.wait_for(rotation_task, timeout=5)
+                        except asyncio.CancelledError:
+                            logger.info(
+                                f"[{req_id}] Rotation task cancelled after timeout."
+                            )
+                        except Exception as cancel_err:
+                            logger.warning(
+                                f"[{req_id}] Rotation task cancellation produced error: {cancel_err}"
+                            )
+
                         yield f"data: {json.dumps({'error': 'Auth rotation timed out.'}, ensure_ascii=False)}\n\n"
                         return
 
@@ -106,6 +215,55 @@ async def resilient_stream_generator(
 
                 success = await rotation_task
                 if success:
+                    # Mark rotation completion time for downstream stream timeout guards.
+                    # This ensures retried streams fail fast on no-data conditions.
+                    GlobalState.LAST_ROTATION_TIMESTAMP = time.time()
+
+                    # Hard gate: ensure critical UI elements exist after rotation
+                    # before retrying stream generation.
+                    page_instance = getattr(state, "page_instance", None)
+                    if page_instance:
+                        post_rotation_ready = await verify_post_rotation_page_ready(
+                            page=page_instance,
+                            req_id=req_id,
+                            max_attempts=2,
+                        )
+                        if not post_rotation_ready:
+                            logger.error(
+                                f"[{req_id}] [POST-ROTATION-READY-CHECK] verification failed. Aborting retry to prevent broken automation state."
+                            )
+                            yield f"data: {json.dumps({'error': 'Post-rotation UI verification failed.'}, ensure_ascii=False)}\n\n"
+                            return
+                        logger.info(
+                            f"[{req_id}] [POST-ROTATION-READY-CHECK] verification passed."
+                        )
+                    else:
+                        logger.warning(
+                            f"[{req_id}] [POST-ROTATION-READY-CHECK] no page instance found; proceeding with retry."
+                        )
+
+                    if before_retry_callback is not None:
+                        try:
+                            retry_submitted = await before_retry_callback()
+                        except Exception as submit_err:
+                            logger.error(
+                                f"[{req_id}] [ROTATION-RETRY-SUBMIT] failed with exception: {submit_err}",
+                                exc_info=True,
+                            )
+                            yield f"data: {json.dumps({'error': 'Failed to re-submit prompt after rotation.'}, ensure_ascii=False)}\n\n"
+                            return
+
+                        if not retry_submitted:
+                            logger.error(
+                                f"[{req_id}] [ROTATION-RETRY-SUBMIT] callback returned failure. Aborting retry."
+                            )
+                            yield f"data: {json.dumps({'error': 'Failed to re-submit prompt after rotation.'}, ensure_ascii=False)}\n\n"
+                            return
+
+                        logger.info(
+                            f"[{req_id}] [ROTATION-RETRY-SUBMIT] prompt re-submitted after rotation."
+                        )
+
                     logger.info(
                         f"[{req_id}] Auth rotation successful. Retrying stream generation..."
                     )
@@ -132,7 +290,7 @@ async def gen_sse_from_aux_stream(
     timeout: float,
     silence_threshold: float = 60.0,
     page: Optional[AsyncPage] = None,
-    stream_state: Optional[Dict[str, Any]] = None,
+    stream_state: Optional[dict[str, Any]] = None,
 ) -> AsyncGenerator[str, None]:
     """Auxiliary stream queue -> OpenAI compatible SSE generator."""
     logger = logging.getLogger("AIStudioProxyServer")
@@ -150,6 +308,7 @@ async def gen_sse_from_aux_stream(
     finish_reason = "stop"
 
     has_started_body = False
+    skip_terminal_chunks_for_retry = False
 
     try:
         async for raw_data in use_stream_response(
@@ -162,10 +321,7 @@ async def gen_sse_from_aux_stream(
         ):
             data_receiving = True
 
-            if (
-                GlobalState.CURRENT_STREAM_REQ_ID
-                and GlobalState.CURRENT_STREAM_REQ_ID != req_id
-            ):
+            if GlobalState.CURRENT_STREAM_REQ_ID and req_id != GlobalState.CURRENT_STREAM_REQ_ID:
                 logger.warning(f"[{req_id}] 🧟 Zombie Stream Detected! Terminating.")
                 break
 
@@ -234,27 +390,106 @@ async def gen_sse_from_aux_stream(
                     )
                     continue
             elif isinstance(raw_data, dict):
-                data = cast(Dict[str, Any], raw_data)
+                data = cast(dict[str, Any], raw_data)
             else:
                 continue
 
             if not isinstance(data, dict):
                 continue
 
-            typed_data: Dict[str, Any] = cast(Dict[str, Any], data)
-            reason = str(typed_data.get("reason", ""))
-            body = _clean_body_text(str(typed_data.get("body", "")))
+            typed_data: dict[str, Any] = cast(dict[str, Any], data)
+            raw_reason = str(typed_data.get("reason", ""))
+            raw_body = _clean_body_text(str(typed_data.get("body", "")))
             done = bool(typed_data.get("done", False))
-            function = cast(List[Any], typed_data.get("function", []))
+            function = _normalize_function_calls(
+                cast(list[Any], typed_data.get("function", []))
+            )
 
-            if reason:
-                full_reasoning_content = reason
-            if body:
-                full_body_content = body
+            # Robust recovery: when a retried stream produces no packets/body after
+            # a recent rotation, convert timeout completion into a retryable signal.
+            if (
+                done
+                and raw_reason in {"ttfb_timeout", "internal_timeout"}
+                and not raw_body.strip()
+                and not function
+                and not full_reasoning_content.strip()
+                and not full_body_content.strip()
+            ):
+                recently_rotated = (
+                    time.time() - GlobalState.LAST_ROTATION_TIMESTAMP < 120.0
+                )
+                if recently_rotated:
+                    logger.warning(
+                        f"[{req_id}] Stream ended with '{raw_reason}' right after rotation. Triggering another rotation attempt."
+                    )
+                    raise QuotaExceededRetry(
+                        f"[{req_id}] Post-rotation stream timeout ({raw_reason})"
+                    )
+
+            # Sanitize emulated function-call text from reasoning/body before streaming.
+            reason = _strip_emulated_function_call_text(raw_reason)
+            body = _strip_emulated_function_call_text(raw_body)
+
+            # Recovery path: if content was sanitized and function list is empty,
+            # attempt to recover function calls from the raw emulated text.
+            if not function:
+                if reason != raw_reason:
+                    recovered_from_reason = _recover_function_calls_from_emulated_text(
+                        raw_reason
+                    )
+                    if recovered_from_reason:
+                        function = recovered_from_reason
+                        logger.debug(
+                            f"[{req_id}] Recovered function calls from emulated reasoning text"
+                        )
+
+                if not function and body != raw_body:
+                    recovered_from_body = _recover_function_calls_from_emulated_text(
+                        raw_body
+                    )
+                    if recovered_from_body:
+                        function = recovered_from_body
+                        logger.debug(
+                            f"[{req_id}] Recovered function calls from emulated body text"
+                        )
+
+            function = _apply_parallel_tool_call_policy(
+                function,
+                getattr(request, "parallel_tool_calls", True),
+                req_id,
+                logger,
+            )
+
+            suppress_text_deltas = bool(function)
+            reason_for_emit = reason
+            body_for_emit = body
+
+            # Safety: once function calls are present in a chunk, do not emit new
+            # text deltas from that chunk. This prevents mixed text/tool payloads
+            # from leaking prompt/planning artifacts in tool-call responses.
+            if suppress_text_deltas:
+                reason_for_emit = full_reasoning_content
+                body_for_emit = full_body_content
+                if FUNCTION_CALLING_DEBUG:
+                    logger.debug(
+                        f"[{req_id}] Suppressing final text delta because done chunk contains function call(s)"
+                    )
+            else:
+                if reason:
+                    full_reasoning_content = reason
+                if body:
+                    full_body_content = body
+
+            # If sanitization truncated cumulative text, clamp cursor positions
+            # to avoid stale offsets and malformed deltas.
+            if len(reason_for_emit) < last_reason_pos:
+                last_reason_pos = len(reason_for_emit)
+            if len(body_for_emit) < last_body_pos:
+                last_body_pos = len(body_for_emit)
 
             # The Latch: Reasoning Handling
-            if len(reason) > last_reason_pos:
-                reason_delta = reason[last_reason_pos:]
+            if len(reason_for_emit) > last_reason_pos:
+                reason_delta = reason_for_emit[last_reason_pos:]
                 if not has_started_body:
                     output = {
                         "id": chat_completion_id,
@@ -274,35 +509,12 @@ async def gen_sse_from_aux_stream(
                         ],
                     }
                     yield f"data: {json.dumps(output, ensure_ascii=False, separators=(',', ':'))}\n\n"
-                last_reason_pos = len(reason)
+                last_reason_pos = len(reason_for_emit)
 
             # The Latch: Body Handling
-            # ALWAYS strip "Request function call:..." text from body
-            # This prevents emulated FC text from appearing as content to clients
-            # even when function call detection fails (race condition protection)
-            original_body = body
-            if body:
-                body = _FUNCTION_CALL_TEXT_PATTERN.sub("", body).strip()
-                if body != original_body:
-                    full_body_content = body
-                    # If we stripped FC text but function is empty, try parsing from the original
-                    if not function:
-                        from api_utils.utils_ext.function_call_response_parser import (
-                            parse_emulated_function_calls_static,
-                        )
-
-                        parsed_fc = parse_emulated_function_calls_static(original_body)
-                        if parsed_fc:
-                            function = parsed_fc
-                            # Demoted from INFO to DEBUG - this is normal fallback behavior
-                            # when model outputs text format instead of native FC
-                            logger.debug(
-                                f"[{req_id}] Recovered function calls from emulated text"
-                            )
-
-            if len(body) > last_body_pos:
-                body_delta = body[last_body_pos:]
-                # Only stream body content if there's actual content after stripping
+            if len(body_for_emit) > last_body_pos:
+                body_delta = body_for_emit[last_body_pos:]
+                # Only stream body content if there's actual content after sanitization
                 if body_delta.strip():
                     has_started_body = True
                     output = {
@@ -322,7 +534,7 @@ async def gen_sse_from_aux_stream(
                         ],
                     }
                     yield f"data: {json.dumps(output, ensure_ascii=False, separators=(',', ':'))}\n\n"
-                last_body_pos = len(body)
+                last_body_pos = len(body_for_emit)
 
             if done:
                 is_recovering = GlobalState.IS_RECOVERING
@@ -350,9 +562,22 @@ async def gen_sse_from_aux_stream(
                     and not is_recovering
                     and not is_quota_exceeded
                     and not function
+                    and not full_body_content.strip()
+                    and not full_reasoning_content.strip()
                 ):
-                    # Only show synthetic message when there's truly no content AND no function calls
-                    # In native FC mode, empty body with function calls is expected
+                    recently_rotated = (
+                        time.time() - GlobalState.LAST_ROTATION_TIMESTAMP < 120.0
+                    )
+                    if recently_rotated:
+                        logger.warning(
+                            f"[{req_id}] Empty DONE received shortly after rotation; treating as retryable recovery failure."
+                        )
+                        raise QuotaExceededRetry(
+                            f"[{req_id}] Empty post-rotation completion payload"
+                        )
+
+                    # Only show synthetic message when there's truly no content AND no function calls.
+                    # In native FC mode, empty body with function calls is expected.
                     fallback_text = (
                         "\n\n*(Model finished thinking but generated no output.)*"
                     )
@@ -425,6 +650,9 @@ async def gen_sse_from_aux_stream(
                 break
 
     except (QuotaExceededError, QuotaExceededRetry):
+        # Let resilient_stream_generator handle rotation/retry without prematurely
+        # finalizing the current SSE stream attempt.
+        skip_terminal_chunks_for_retry = True
         raise
     except ClientDisconnectedError:
         logger.info(f"[{req_id}] Client disconnected in stream generator")
@@ -457,37 +685,43 @@ async def gen_sse_from_aux_stream(
         except Exception:
             pass
     finally:
-        try:
-            usage_stats = calculate_usage_stats(
-                [msg.model_dump() for msg in request.messages],
-                full_body_content,
-                full_reasoning_content,
+        if skip_terminal_chunks_for_retry:
+            logger.info(
+                f"[{req_id}] Retryable quota signal propagated; skipping terminal SSE chunks for retry."
             )
-            total_tokens = usage_stats.get("total_tokens", 0)
-            GlobalState.increment_token_count(total_tokens)
-            from api_utils.server_state import state
-
-            if (
-                hasattr(state, "current_auth_profile_path")
-                and state.current_auth_profile_path
-            ):
-                await increment_profile_usage(
-                    state.current_auth_profile_path, total_tokens
+        else:
+            try:
+                usage_stats = calculate_usage_stats(
+                    [msg.model_dump() for msg in request.messages],
+                    full_body_content,
+                    full_reasoning_content,
                 )
+                total_tokens = usage_stats.get("total_tokens", 0)
+                GlobalState.increment_token_count(total_tokens)
+                from api_utils.server_state import state
 
-            final_chunk = {
-                "id": chat_completion_id,
-                "object": "chat.completion.chunk",
-                "model": model_name_for_stream,
-                "created": created_timestamp,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-                "usage": usage_stats,
-            }
-            yield f"data: {json.dumps(final_chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
-        except Exception as usage_err:
-            logger.error(f"[{req_id}] Error sending usage stats: {usage_err}")
+                if (
+                    hasattr(state, "current_auth_profile_path")
+                    and state.current_auth_profile_path
+                ):
+                    await increment_profile_usage(
+                        state.current_auth_profile_path, total_tokens
+                    )
 
-        yield "data: [DONE]\n\n"
+                final_chunk = {
+                    "id": chat_completion_id,
+                    "object": "chat.completion.chunk",
+                    "model": model_name_for_stream,
+                    "created": created_timestamp,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                    "usage": usage_stats,
+                }
+                yield f"data: {json.dumps(final_chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
+            except Exception as usage_err:
+                logger.error(f"[{req_id}] Error sending usage stats: {usage_err}")
+
+            yield "data: [DONE]\n\n"
+
         if not event_to_set.is_set():
             event_to_set.set()
 
@@ -520,8 +754,31 @@ async def gen_sse_from_playwright(
         response_data = await page_controller.get_response_with_function_calls(
             check_client_disconnected, prompt_length=prompt_length, timeout=timeout
         )
-        final_content = response_data.get("content", "")
-        function_calls = response_data.get("function_calls", [])
+        raw_content = _clean_body_text(str(response_data.get("content", "") or ""))
+        final_content = _strip_emulated_function_call_text(raw_content)
+        function_calls = _normalize_function_calls(
+            cast(list[Any], response_data.get("function_calls", []))
+        )
+
+        if not function_calls and final_content != raw_content:
+            recovered_calls = _recover_function_calls_from_emulated_text(raw_content)
+            if recovered_calls:
+                function_calls = recovered_calls
+                logger.debug(
+                    f"[{req_id}] Recovered function calls from Playwright content"
+                )
+
+        function_calls = _apply_parallel_tool_call_policy(
+            function_calls,
+            getattr(request, "parallel_tool_calls", True),
+            req_id,
+            logger,
+        )
+
+        # Safety: when tool calls are present, do not stream textual content.
+        # This avoids leaking DOM fallback text or prompt artifacts in mixed responses.
+        if function_calls:
+            final_content = ""
 
         data_receiving = True
         lines = final_content.split("\n")

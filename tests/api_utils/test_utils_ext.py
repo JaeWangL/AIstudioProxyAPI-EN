@@ -303,6 +303,37 @@ async def test_use_stream_response_timeout():
 
 
 @pytest.mark.asyncio
+async def test_use_stream_response_post_rotation_ttfb_timeout_fast_fail():
+    """After recent rotation, stream with no packets should fail faster than full timeout."""
+    from config.global_state import GlobalState
+
+    mock_queue = MagicMock()
+    mock_queue.get_nowait.side_effect = queue.Empty
+
+    prev_ts = GlobalState.LAST_ROTATION_TIMESTAMP
+    GlobalState.LAST_ROTATION_TIMESTAMP = time.time()
+    try:
+        with (
+            patch.object(state, "STREAM_QUEUE", mock_queue),
+            patch.object(state, "logger"),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            chunks = []
+            async for chunk in use_stream_response(
+                "req1", timeout=600.0, enable_silence_detection=True
+            ):
+                chunks.append(chunk)
+
+            assert len(chunks) == 1
+            assert chunks[0]["reason"] == "ttfb_timeout"
+            assert chunks[0]["done"] is True
+            # 600s timeout would be 6000 empty polls without fast-fail.
+            assert mock_queue.get_nowait.call_count <= 350
+    finally:
+        GlobalState.LAST_ROTATION_TIMESTAMP = prev_ts
+
+
+@pytest.mark.asyncio
 async def test_use_stream_response_mixed_types():
     # Test non-JSON string and dictionary data
     q_data = [
@@ -419,15 +450,18 @@ async def test_use_stream_response_quota_exceeded_error():
     mock_queue = MagicMock()
     mock_queue.get_nowait.side_effect = [error_data, queue.Empty()]
 
-    with patch.object(state, "STREAM_QUEUE", mock_queue), patch.object(state, "logger"):
-        with pytest.raises(QuotaExceededError) as exc_info:
-            async for chunk in use_stream_response(
-                "req1", enable_silence_detection=True
-            ):
-                pass
+    with (
+        patch.object(state, "STREAM_QUEUE", mock_queue),
+        patch.object(state, "logger"),
+        pytest.raises(QuotaExceededError) as exc_info,
+    ):
+        async for _chunk in use_stream_response(
+            "req1", enable_silence_detection=True
+        ):
+            pass
 
-        assert "AI Studio quota exceeded" in str(exc_info.value)
-        assert exc_info.value.req_id == "req1"
+    assert "AI Studio quota exceeded" in str(exc_info.value)
+    assert exc_info.value.req_id == "req1"
 
 
 @pytest.mark.asyncio
@@ -443,12 +477,15 @@ async def test_use_stream_response_quota_error_by_message():
     mock_queue = MagicMock()
     mock_queue.get_nowait.side_effect = [error_data, queue.Empty()]
 
-    with patch.object(state, "STREAM_QUEUE", mock_queue), patch.object(state, "logger"):
-        with pytest.raises(QuotaExceededError):
-            async for chunk in use_stream_response(
-                "req1", enable_silence_detection=True
-            ):
-                pass
+    with (
+        patch.object(state, "STREAM_QUEUE", mock_queue),
+        patch.object(state, "logger"),
+        pytest.raises(QuotaExceededError),
+    ):
+        async for _chunk in use_stream_response(
+            "req1", enable_silence_detection=True
+        ):
+            pass
 
 
 @pytest.mark.asyncio
@@ -464,16 +501,19 @@ async def test_use_stream_response_upstream_error():
     mock_queue = MagicMock()
     mock_queue.get_nowait.side_effect = [error_data, queue.Empty()]
 
-    with patch.object(state, "STREAM_QUEUE", mock_queue), patch.object(state, "logger"):
-        with pytest.raises(UpstreamError) as exc_info:
-            async for chunk in use_stream_response(
-                "req1", enable_silence_detection=True
-            ):
-                pass
+    with (
+        patch.object(state, "STREAM_QUEUE", mock_queue),
+        patch.object(state, "logger"),
+        pytest.raises(UpstreamError) as exc_info,
+    ):
+        async for _chunk in use_stream_response(
+            "req1", enable_silence_detection=True
+        ):
+            pass
 
-        assert "AI Studio error" in str(exc_info.value)
-        # status_code is stored in context dict, not direct attribute
-        assert exc_info.value.context.get("status_code") == 500
+    assert "AI Studio error" in str(exc_info.value)
+    # status_code is stored in context dict, not direct attribute
+    assert exc_info.value.context.get("status_code") == 500
 
 
 @pytest.mark.asyncio
@@ -540,20 +580,20 @@ async def test_use_stream_response_generic_exception():
     with (
         patch.object(state, "STREAM_QUEUE", mock_queue),
         patch.object(state, "logger") as mock_logger,
+        pytest.raises(RuntimeError, match="Unexpected error"),
     ):
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            async for chunk in use_stream_response(
-                "req1", enable_silence_detection=True
-            ):
-                pass
+        async for _chunk in use_stream_response(
+            "req1", enable_silence_detection=True
+        ):
+            pass
 
-        # Verify error was logged (line 157)
-        error_calls = [
-            c
-            for c in mock_logger.error.call_args_list
-            if "Error in stream generator" in str(c)
-        ]
-        assert len(error_calls) > 0
+    # Verify error was logged (line 157)
+    error_calls = [
+        c
+        for c in mock_logger.error.call_args_list
+        if "Error in stream generator" in str(c)
+    ]
+    assert len(error_calls) > 0
 
 
 @pytest.mark.asyncio
@@ -617,7 +657,7 @@ def test_extract_data_url_to_local_write_failure():
         patch("config.UPLOAD_FILES_DIR", "/tmp/uploads"),
         patch("os.makedirs"),
         patch("os.path.exists", return_value=False),
-        patch("builtins.open", side_effect=IOError("Disk full")),
+        patch("builtins.open", side_effect=OSError("Disk full")),
     ):
         mock_logger = MagicMock()
         mock_get_logger.return_value = mock_logger
@@ -669,7 +709,7 @@ def test_save_blob_to_local_write_failure():
         patch("config.UPLOAD_FILES_DIR", "/tmp/uploads"),
         patch("os.makedirs"),
         patch("os.path.exists", return_value=False),
-        patch("builtins.open", side_effect=IOError("Permission denied")),
+        patch("builtins.open", side_effect=OSError("Permission denied")),
     ):
         mock_logger = MagicMock()
         mock_get_logger.return_value = mock_logger
