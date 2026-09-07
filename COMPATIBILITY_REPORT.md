@@ -143,10 +143,84 @@ is contradicted by the physical control, but editor state, automated-input handl
 and session/provider behavior are not yet isolated. No more automatic generation
 or 30-image comparison was started, and no business DB/credit/API-key writes occurred.
 
+## Follow-up: user reports manual copy/paste also succeeds
+
+After the physical-typing controls, the user reported that their own copy/paste
+also works. This latest result is user-reported, not a newly instrumented request.
+It weakens the hypothesis that pasted text alone causes the observed denial. The
+current evidence is a difference between successful human-operated requests and
+failed automated requests, not proof of a particular bot detector or a 100% detection
+rate. Event handling, editor/request readiness, session state and automation-related
+validation have not been isolated from one another. Earlier manual success inside
+the proxy browser also argues against unconditional denial of that browser session.
+No new generation, identity/security change, or retry was made for this update.
+
+## Follow-up: read-only submission diagnostics and real HTTP denial
+
+At 06:59 KST, a bounded native-UI control used the official model picker for
+3.8 Flash / Low, tools off, a closed settings panel, and the literal 22-character
+`reply with exactly OK.` prompt. Before the single normal Run click, read-only
+observations showed document readiness complete, a visible/focused editor, an
+enabled/uncovered Run button and an already completed **CountTokens HTTP 200**.
+The existing UI network traffic then showed **GenerateContent HTTP 403** alongside
+the permission toast. Thus an open panel, disabled/covered Run button, or failure
+to wait for that token-count request cannot alone explain this control's failure.
+Reported user-activation fields do not prove equivalence with physical-input
+security events. Nothing was changed to spoof those fields.
+
+A 07:01 HTTP control reproduced the denial in 9.764 s, but exposed another proxy
+bug: it translated the provider denial into retryable-looking HTTP 502. The final
+patch separates access denial from generic generation errors and pauses further
+automatic submissions, including requests already waiting in the local queue.
+
+At 07:07 KST the final live text-only check, with explicit 3.8 Flash / Low / tools
+off, returned **HTTP 403 / retryable=false in 11.051 s**. The received rejection
+body was 44 characters and not recognized as standard JSON. Sanitized diagnostics
+contained no specific reason or automated-queries/unusual-traffic notice. Absence
+of those notices does **not** rule out automation-related enforcement. Raw failure
+text, request payloads, headers and credentials were not emitted by this diagnostic.
+
+The worker/browser remained alive, but `/health` correctly returned 503 with
+`generationAccess.status=denied`. One subsequent loopback request returned the same
+403 in **0.002497 s**, without another prompt entry, Run click or GenerateContent
+submission. The process was left running with submissions paused; it was not
+restarted to clear denial. Final source-only tests additionally cover a vanished
+toast: observed network denial remains 403 even if response location fails. This
+last edge-case change was not loaded into the paused live process.
+
+These are failure latencies, not throughput measurements. No successful automated
+generation or image/parser comparison is claimed. The most useful remaining
+distinction is successful human-operated requests versus denied automated requests,
+not confirmed knowledge of the provider's detector. No browser-identity/security
+changes, account switching, paid-key fallback, business-DB writes or credit charges
+were made. Further live progress requires a permitted automated submission path;
+repeating denied requests is not a compatibility fix. Offline package compatibility
+checks can still proceed without contacting Google.
+
+## Follow-up: Python package versus browser-engine versions
+
+The user suggested rechecking the latest Camoufox. The actual installed engine,
+152.0.4-beta.30, matches the [latest official browser release](https://github.com/daijro/camoufox/releases/tag/v152.0.4-beta.30),
+but both dependency declarations still pin the **Python package to 0.4.11**.
+The latest [PyPI package is 0.5.6](https://pypi.org/project/camoufox/0.5.6/), released
+September 6. Updating Playwright/the browser did not update that wrapper. Therefore
+these results do not establish failure with the latest complete software stack.
+An isolated, no-Google compatibility check of the newer wrapper is the next local
+diagnostic; an upgrade alone must not be represented as a verified permission fix.
+The isolated 0.5.6 package was installed without changing the project environment;
+39 targeted mocked/unit tests passed in 6.03 s. Source inspection found a concrete
+upgrade concern not exercised by those mocks: its server keeps stdin open after a
+newline-delimited configuration frame, while this fork's 0.4.11 bridge waits for EOF
+before launching. A direct package bump would therefore hang that bridge. The new
+package also changes browser-cache layout/cleanup behavior; do not call its default
+browser resolver against the active legacy cache without reviewing migration.
+No real-browser or Google-generation test on 0.5.6 was performed. The authenticated
+live service remains on 0.4.11 with its denial latch intact.
+
 ## Repeatable checks
 
-Final readback-guard unit run: **2,353 passed, 9 skipped, 68 integration-marked tests excluded**
-in 65.43 s, with 59 warnings (including inherited unawaited-coroutine/deprecation
+Final access-diagnostics unit run: **2,379 passed, 9 skipped, 68 integration-marked tests excluded**
+in 65.74 s, with 59 warnings (including inherited unawaited-coroutine/deprecation
 warnings). Ruff and targeted Pyright checks passed. This is not full integration
 coverage; the real-browser no-Google fixture passed separately.
 
@@ -158,6 +232,6 @@ uv run python scripts/browser_runtime_smoke.py
 ```
 
 The app-side diagnostic transport and unchanged parser also passed 27 tests in
-0.73 s in their separate repository. Do not confuse unit/fixture success with live Google QA.
+0.69 s in their separate repository. Do not confuse unit/fixture success with live Google QA.
 Consult GETTING_STARTED.md and AGENTS.md before continuing; preserve all failure
 evidence privately and never commit auth files, customer images, or full snapshots.

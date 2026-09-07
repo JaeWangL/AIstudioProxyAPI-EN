@@ -434,6 +434,9 @@ def create_app() -> FastAPI:
     app.get("/assets/{filename:path}")(serve_react_assets)
     app.get("/api/info")(get_api_info)
     app.get("/health")(health_check)
+    from .routers.submission_diagnostics import submission_diagnostics
+
+    app.get("/api/diagnostics/submission")(submission_diagnostics)
     app.get("/v1/models")(list_models)
     app.post("/v1/chat/completions")(chat_completions)
     app.post("/v1/cancel/{req_id}")(cancel_request)

@@ -61,15 +61,50 @@ async def test_permission_denied_is_not_a_parser_or_generic_internal_error(
         patch(
             "browser_utils.operations.save_error_snapshot", new_callable=AsyncMock
         ) as snapshot,
+        patch("browser_utils.generation_access.mark_ui_permission_denied") as block,
     ):
         expect.return_value.to_be_attached = AsyncMock()
         with pytest.raises(HTTPException) as error:
             await locate_response_elements(
                 setup["page"], "req1", setup["logger"], setup["check_disconnect"]
             )
-    assert error.value.status_code == 502
-    assert "denied generation permission" in error.value.detail
+    assert error.value.status_code == 403
+    assert "denied generation permission" in error.value.detail["message"]
+    assert error.value.detail["retryable"] is False
+    block.assert_called_once()
     snapshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [HTTPException(502, "internal"), asyncio.TimeoutError()]
+)
+async def test_network_denial_remains_403_without_visible_toast(
+    mock_page_response_setup, failure
+):
+    from browser_utils.generation_access import permission_denied
+
+    setup = mock_page_response_setup
+    with (
+        patch("api_utils.page_response.expect_async") as expect,
+        patch(
+            "api_utils.page_response._wait_for_text_or_provider_error",
+            new=AsyncMock(side_effect=failure),
+        ),
+        patch("browser_utils.operations.save_error_snapshot", new_callable=AsyncMock),
+        patch(
+            "browser_utils.generation_access.ensure_generation_access",
+            side_effect=permission_denied(),
+        ),
+    ):
+        expect.return_value.to_be_attached = AsyncMock()
+        with pytest.raises(HTTPException) as error:
+            await locate_response_elements(
+                setup["page"], "req1", setup["logger"], setup["check_disconnect"]
+            )
+    assert error.value.status_code == 403
+    assert error.value.detail["retryable"] is False
+    setup["page"].get_by_text.assert_not_called()
 
 
 @pytest.fixture

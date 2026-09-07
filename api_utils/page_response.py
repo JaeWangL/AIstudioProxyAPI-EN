@@ -55,26 +55,35 @@ async def locate_response_elements(
         )
         logger.info(f"[{req_id}] Response elements located.")
     except HTTPException:
+        from browser_utils.generation_access import ensure_generation_access
+        from browser_utils.submission_diagnostics import log_submission_state
+
+        await log_submission_state(page, logger, req_id, "provider_error")
         from browser_utils.operations import save_error_snapshot
 
-        from .error_utils import upstream_error
-
         await save_error_snapshot(f"provider_generation_error_{req_id}")
+        # Network evidence remains authoritative if the short-lived toast is gone.
+        ensure_generation_access()
         if await page.get_by_text(
             "Failed to generate content: permission denied. Please try again.",
             exact=True,
         ).is_visible():
-            raise upstream_error(
-                req_id,
-                "AI Studio denied generation permission; human account/access review required",
-            ) from None
+            from browser_utils.generation_access import (
+                mark_ui_permission_denied,
+                permission_denied,
+            )
+
+            mark_ui_permission_denied()
+            raise permission_denied() from None
         raise
     except (PlaywrightAsyncError, asyncio.TimeoutError, AssertionError) as locate_err:
+        from browser_utils.generation_access import ensure_generation_access
         from browser_utils.operations import save_error_snapshot
 
         from .error_utils import upstream_error
 
         await save_error_snapshot(f"response_location_error_{req_id}")
+        ensure_generation_access()
 
         raise upstream_error(
             req_id, f"Failed to locate AI Studio response elements: {locate_err}"

@@ -106,4 +106,17 @@ def setup_debug_listeners(page: AsyncPage) -> None:
     page.on("request", handle_request)
     page.on("response", handle_response)
 
+    from browser_utils.generation_access import track_generation_response
+
+    page.on("response", track_generation_response)
+
+    from browser_utils.submission_diagnostics import enabled, log_generation_failure
+
+    if enabled():
+
+        async def record_generation_failure(response):
+            await log_generation_failure(response, logger)
+
+        page.on("response", record_generation_failure)
+
     logger.debug("Debug listeners (console + network) attached to page")

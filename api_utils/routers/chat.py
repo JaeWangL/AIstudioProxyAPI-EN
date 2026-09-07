@@ -37,6 +37,9 @@ async def chat_completions(
     set_source("API")
 
     logger.info(f"Received /v1/chat/completions request (Stream={request.stream})")
+    from browser_utils.generation_access import ensure_generation_access
+
+    ensure_generation_access()
 
     launch_mode = get_environment_variable("LAUNCH_MODE", "unknown")
     browser_page_critical = launch_mode != "direct_debug_no_browser"

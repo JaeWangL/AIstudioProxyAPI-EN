@@ -27,6 +27,7 @@ from config import (
 from config.model_profiles import uses_fixed_sampling, validate_model_parameters
 from models import ClientDisconnectedError
 
+from .generation_access import ensure_generation_access
 from .initialization import enable_temporary_chat_mode
 from .models.readiness import close_run_settings_panel, verify_rendered_model
 from .models.request_contract import verify_requested_settings
@@ -44,6 +45,7 @@ from .page_controller_modules.input import InputController
 from .page_controller_modules.parameters import ParameterController
 from .page_controller_modules.response import ResponseController
 from .page_controller_modules.thinking import ThinkingController
+from .submission_diagnostics import log_submission_state
 
 
 class PageController(
@@ -163,6 +165,7 @@ class PageController(
         Keyboard fallback or reload-and-resubmit can hide UI bugs and duplicate a
         request whose click was already dispatched. Fail instead of guessing.
         """
+        ensure_generation_access()
         await close_run_settings_panel(self.page)
         self.logger.info(
             f"[{self.req_id}] Run settings panel hidden; button-only submission."
@@ -170,6 +173,7 @@ class PageController(
         textarea = self.page.locator(PROMPT_TEXTAREA_SELECTOR)
         await expect_async(textarea).to_be_visible(timeout=10000)
         await self._check_disconnect(check_client_disconnected, "After Input Visible")
+        await log_submission_state(self.page, self.logger, self.req_id, "before_input")
         await textarea.fill(prompt, timeout=10000)
         await self._check_disconnect(check_client_disconnected, "After Input Fill")
         if await textarea.input_value(timeout=5000) != prompt:
@@ -195,10 +199,12 @@ class PageController(
         # Uploads can re-render the editor. Check again before the only Run click.
         if await textarea.input_value(timeout=5000) != prompt:
             raise RuntimeError("Prompt changed before Run; prompt not submitted")
+        await log_submission_state(self.page, self.logger, self.req_id, "before_run")
         self.logger.info(f"[{self.req_id}] Clicking verified Run button...")
         # Normal Playwright hit-testing: no force, DOM click, or keyboard fallback.
         await submit.click(timeout=5000)
         self.logger.info(f"[{self.req_id}] Submit button clicked.")
+        await log_submission_state(self.page, self.logger, self.req_id, "after_run")
         await check_quota_limit(self.page, self.req_id)
         await self._check_disconnect(check_client_disconnected, "After Submit")
 

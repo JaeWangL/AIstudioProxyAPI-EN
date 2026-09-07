@@ -64,6 +64,36 @@ requires removing them. Explicit unsupported overrides are rejected with 422, no
 silently ignored. `minimal`/numeric thinking budgets are also rejected for 3.8.
 Never silently substitute another model. Omitted thinking effort defaults to medium.
 
+## Provider access and diagnostics
+
+An actual GenerateContent HTTP 403 or the exact permission-denied toast pauses
+automatic submissions. `/v1/chat/completions` then returns 403 with
+`detail.code=aistudio_generation_permission_denied` and `detail.retryable=false`.
+New requests are rejected before queuing, and already queued requests are checked
+again before submission. Quota exhaustion (429) is not classified as this denial.
+
+`/health` includes `details.generationAccess` (`unknown`, `accepted`, or `denied`),
+its observation time and the HTTP status when available. It returns 503 when denied,
+even if `workerRunning` and browser-ready flags remain true. Treat this as lack of
+generation readiness, **not** a liveness check that triggers repeated restarts.
+The latch is process-local, not a persistent account-access database; restarting is
+not an access fix. Human/provider access review is required. A naturally observed
+GenerateContent 200 clears the latch; that status is not proof of valid model output
+or permission for future automated requests. No automatic recovery probe is sent.
+
+For a bounded local investigation, add `SUBMISSION_DIAGNOSTICS=true` to the launch
+environment. It defaults to false. `GET /api/diagnostics/submission` is available only
+to a loopback client while enabled. It reads editor length/focus/readiness, Run-button
+hit-testing and sanitized RPC method/status metadata, without sending a prompt.
+Failed generation responses can additionally log standard error enums or coarse
+non-JSON format indicators; no raw response text, request body, headers, prompt text
+or credentials are emitted by this diagnostic. Inherited screenshots/network logs
+are separate private artifacts and must not be published. Do not enable this on an
+externally exposed or reverse-proxied deployment.
+
+These changes make denial observable and stop futile retries. They **do not fix**
+the current human-input versus automated-input discrepancy; see the audit report.
+
 ## What changed
 
 - The current Playground can remove a closed run-settings panel from the DOM.

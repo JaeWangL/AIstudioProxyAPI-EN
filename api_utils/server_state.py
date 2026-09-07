@@ -59,6 +59,7 @@ class ServerState:
         self.is_browser_connected: bool = False
         self.is_page_ready: bool = False
         self.is_initializing: bool = False
+        self.generation_access: Dict[str, Any] = {"status": "unknown"}
 
         # --- Proxy Configuration ---
         self.PLAYWRIGHT_PROXY_SETTINGS: Optional[Dict[str, str]] = None

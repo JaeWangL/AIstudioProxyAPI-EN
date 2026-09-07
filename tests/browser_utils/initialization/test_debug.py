@@ -63,7 +63,7 @@ def test_listeners_attached(mock_page, mock_state_with_logs):
     """Test all listeners attached"""
     setup_debug_listeners(mock_page)
 
-    assert mock_page.on.call_count == 3
+    assert mock_page.on.call_count == 4
 
     listener_names = [call_args[0][0] for call_args in mock_page.on.call_args_list]
     assert "console" in listener_names

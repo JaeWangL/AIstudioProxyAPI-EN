@@ -28,10 +28,20 @@ async def health_check(
         )
 
     is_core_ready = all(core_ready_conditions)
+    from api_utils.server_state import state
+
+    generation_denied = (
+        browser_page_critical and state.generation_access["status"] == "denied"
+    )
+    is_core_ready = is_core_ready and not generation_denied
     status_val = "OK" if is_core_ready and is_worker_running else "Error"
     q_size = request_queue.qsize() if request_queue else -1
 
     status_message_parts = []
+    if generation_denied:
+        status_message_parts.append(
+            "AI Studio generation permission denied; automatic submissions paused"
+        )
     if server_state["is_initializing"]:
         status_message_parts.append("Initialization in progress")
     if not server_state["is_playwright_ready"]:
@@ -49,6 +59,7 @@ async def health_check(
         "message": "",
         "details": {
             **server_state,
+            "generationAccess": dict(state.generation_access),
             "workerRunning": is_worker_running,
             "queueLength": q_size,
             "launchMode": launch_mode,
