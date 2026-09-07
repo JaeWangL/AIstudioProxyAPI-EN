@@ -3,10 +3,49 @@ from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from playwright.async_api import TimeoutError
 from pydantic import ValidationError
 
 from browser_utils.page_controller import PageController
 from models.chat import ChatCompletionRequest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["disabled", "intercepted", "upload"])
+async def test_main_submission_never_uses_keyboard_or_retries(failure):
+    page = MagicMock()
+    control = page.locator.return_value
+    control.fill = AsyncMock()
+    control.click = AsyncMock(
+        side_effect=TimeoutError("intercepted") if failure == "intercepted" else None
+    )
+    controller = PageController(page, MagicMock(), "test123")
+    controller._open_upload_menu_and_choose_file = AsyncMock(
+        return_value=failure != "upload"
+    )
+    controller._try_enter_submit = AsyncMock()
+    controller._try_combo_submit = AsyncMock()
+    controller._safe_reload_page = AsyncMock()
+    with (
+        patch(
+            "browser_utils.page_controller.close_run_settings_panel",
+            new_callable=AsyncMock,
+        ) as close,
+        patch("browser_utils.page_controller.expect_async") as expect,
+    ):
+        expect.return_value.to_be_visible = AsyncMock()
+        expect.return_value.to_be_enabled = AsyncMock(
+            side_effect=AssertionError("disabled") if failure == "disabled" else None
+        )
+        with pytest.raises((AssertionError, TimeoutError, RuntimeError)):
+            await controller.submit_prompt(
+                "exact input", ["fixture.png"], lambda stage: False
+            )
+        close.assert_awaited_once_with(page)
+    assert control.click.await_count == (1 if failure == "intercepted" else 0)
+    controller._try_enter_submit.assert_not_awaited()
+    controller._try_combo_submit.assert_not_awaited()
+    controller._safe_reload_page.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

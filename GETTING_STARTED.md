@@ -85,6 +85,8 @@ Never silently substitute another model. Omitted thinking effort defaults to med
   After settings verification, the responsive settings panel is closed so it does
   not intercept Run clicks. Prompt filling and file selection have bounded waits;
   submission does not accept arbitrary consent dialogs or remove application DOM.
+  The main submission path uses one normal Run click only. A disabled/covered button
+  or failed upload fails the request: there is no hotkey or automatic resubmit fallback.
 - Parameter caches are invalidated before each request: New chat may restore UI
   defaults without changing the selected model. Cached thinking levels are not proof.
 - An explicit internal-generation error in the model turn is reported as an upstream

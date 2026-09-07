@@ -7,6 +7,9 @@ changing dependencies. Do not infer compatibility from version numbers alone.
 
 Use actual DOM evidence for UI changes. Verify the rendered model and requested
 parameters before sending a prompt; localStorage/cache/HTTP 200 is insufficient.
+The main controller must close the responsive settings panel and use one normal
+actionability-checked Run click. Do not fall back to hotkeys, forced/DOM clicks,
+or reload-and-resubmit when that click is blocked or its result is uncertain.
 Never normalize malformed model output to turn a failed segmentation into success.
 Preserve the caller's prompt/image bytes and its existing parser/failure policy.
 An advertised/rendered model is not proof of generation permission. A permission-denied

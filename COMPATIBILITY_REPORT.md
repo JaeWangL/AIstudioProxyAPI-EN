@@ -29,6 +29,7 @@ or external helper was enabled. Provider billing was not independently audited.
 3. The current Run button lacks the old submit attributes. The responsive right
    panel can also cover Run; the final patch closes it after settings verification.
    That last panel-closure change is fixture-tested, not a successful live generation.
+   The follow-up below tests panel closure live and supersedes that validation status.
 4. The old broad pre-click overlay helpers could stall before Run. They are no longer
    used by the main controller; arbitrary consent buttons are not auto-accepted.
 5. Most importantly, the final live two-image replay reached AI Studio generation but
@@ -48,10 +49,30 @@ Earlier Antigravity replays of the same two inputs passed the unchanged parser, 
 two samples do not establish stability. The planned fixed 30-image comparison,
 crop quality, response-extraction fidelity, Linux, and throughput remain unverified.
 
+## Follow-up: settings panel / normal-button hypothesis
+
+At 06:32 KST on 2026-09-08, the user requested a controlled check of whether sending
+while the settings panel was open caused the permission denial. The same authenticated
+proxy session, exact first image, prompt hash, model, Low thinking, and model-default
+sampling policy were retained. No identity/security/anti-detection changes were made.
+
+- 06:32:56.153: settings panel confirmed hidden.
+- 06:32:56.201: native file selection completed.
+- 06:32:57.324: normal Playwright Run click completed with hit-testing; no force,
+  DOM click, keyboard fallback, or automatic resubmission.
+- 06:32:57.966: permission-denied UI confirmed and reported as an upstream error.
+- End-to-end failure: 10.916 s; no segmentation text reached the parser.
+
+Thus the open-panel submission is **not the sole explanation**. The trial does not
+establish or exclude automation detection, session issues, or account/model access.
+A same-window, human-clicked text-only control was prepared but not submitted by
+the agent. Its result is pending; this control is not a segmentation A/B sample.
+Do not proceed to 30-image requests until permitted generation is established.
+
 ## Repeatable checks
 
-Final local unit run: **2,342 passed, 9 skipped, 68 integration-marked tests excluded**
-in 65.49 s, with 59 warnings (including inherited unawaited-coroutine/deprecation
+Final local unit run: **2,345 passed, 9 skipped, 68 integration-marked tests excluded**
+in 65.06 s, with 59 warnings (including inherited unawaited-coroutine/deprecation
 warnings). Ruff and targeted Pyright checks passed. This is not full integration
 coverage; the real-browser no-Google fixture passed separately.
 

@@ -25,7 +25,7 @@ from config import (
     UPLOAD_BUTTON_SELECTOR,
 )
 from config.model_profiles import uses_fixed_sampling, validate_model_parameters
-from models import ClientDisconnectedError, QuotaExceededError
+from models import ClientDisconnectedError
 
 from .initialization import enable_temporary_chat_mode
 from .models.readiness import close_run_settings_panel, verify_rendered_model
@@ -158,104 +158,41 @@ class PageController(
     async def submit_prompt(
         self, prompt: str, image_list: List, check_client_disconnected: Callable
     ):
-        """Submit prompt to the page with retries and keyboard fallbacks."""
+        """Submit once through an unobstructed, enabled Run button.
+
+        Keyboard fallback or reload-and-resubmit can hide UI bugs and duplicate a
+        request whose click was already dispatched. Fail instead of guessing.
+        """
         await close_run_settings_panel(self.page)
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                self.logger.info(
-                    f"[{self.req_id}] Filling and submitting prompt (Attempt {attempt + 1}/{max_retries})..."
+        self.logger.info(
+            f"[{self.req_id}] Run settings panel hidden; button-only submission."
+        )
+        textarea = self.page.locator(PROMPT_TEXTAREA_SELECTOR)
+        await expect_async(textarea).to_be_visible(timeout=10000)
+        await self._check_disconnect(check_client_disconnected, "After Input Visible")
+        await textarea.fill(prompt, timeout=10000)
+        await self._check_disconnect(check_client_disconnected, "After Input Fill")
+
+        if image_list:
+            self.logger.info(f"[{self.req_id}] Attaching {len(image_list)} file(s)...")
+            if not await self._open_upload_menu_and_choose_file(image_list):
+                raise RuntimeError(
+                    "File selection did not complete; prompt not submitted"
                 )
-                textarea = self.page.locator(PROMPT_TEXTAREA_SELECTOR)
-                await expect_async(textarea).to_be_visible(timeout=10000)
-                await self._check_disconnect(
-                    check_client_disconnected, "After Input Visible"
-                )
+            self.logger.info(f"[{self.req_id}] Native file selection completed.")
 
-                await textarea.fill(prompt, timeout=10000)
-                await self._check_disconnect(
-                    check_client_disconnected, "After Input Fill"
-                )
-
-                if image_list:
-                    self.logger.info(
-                        f"[{self.req_id}] Attaching {len(image_list)} file(s)..."
-                    )
-                    await self._open_upload_menu_and_choose_file(image_list)
-                    self.logger.info(
-                        f"[{self.req_id}] Native file selection completed."
-                    )
-
-                # Wait for submit button to be enabled
-                submit = self.page.locator(SUBMIT_BUTTON_SELECTOR)
-                button_clicked = False
-                is_btn_enabled = False
-                try:
-                    await expect_async(submit).to_be_enabled(timeout=10000)
-                    is_btn_enabled = True
-                except Exception:
-                    self.logger.warning(
-                        f"[{self.req_id}] Submit button not enabled within timeout, trying keyboard fallback."
-                    )
-
-                await self._check_disconnect(
-                    check_client_disconnected, "After Submit Button Check"
-                )
-
-                if is_btn_enabled:
-                    try:
-                        # Let Playwright check actionability. Do not accept arbitrary
-                        # Agree/Allow dialogs or remove application DOM before Run.
-                        self.logger.info(
-                            f"[{self.req_id}] Clicking verified Run button..."
-                        )
-                        await submit.click(timeout=5000)
-                        button_clicked = True
-                        self.logger.info(f"[{self.req_id}] Submit button clicked.")
-                        await check_quota_limit(self.page, self.req_id)
-                    except QuotaExceededError:
-                        raise
-                    except Exception as click_err:
-                        self.logger.warning(
-                            f"[{self.req_id}] Button click failed: {click_err}. Trying keyboard fallback."
-                        )
-
-                if not button_clicked:
-                    # Keyboard fallbacks (using logic inherited from InputController)
-                    self.logger.info(
-                        f"[{self.req_id}] Attempting Enter key submission..."
-                    )
-                    if await self._try_enter_submit(
-                        textarea, check_client_disconnected
-                    ):
-                        button_clicked = True
-                    else:
-                        self.logger.info(
-                            f"[{self.req_id}] Attempting Combo key submission..."
-                        )
-                        if await self._try_combo_submit(
-                            textarea, check_client_disconnected
-                        ):
-                            button_clicked = True
-
-                if not button_clicked:
-                    raise Exception(
-                        "Failed to submit prompt via button or keyboard shortcuts."
-                    )
-
-                await self._check_disconnect(check_client_disconnected, "After Submit")
-                return
-            except QuotaExceededError:
-                raise
-            except Exception as e:
-                self.logger.warning(
-                    f"[{self.req_id}] Error during submit (Attempt {attempt + 1}): {e}"
-                )
-                if attempt < max_retries - 1:
-                    await self._safe_reload_page()
-                    await asyncio.sleep(2)
-                else:
-                    raise e
+        submit = self.page.locator(SUBMIT_BUTTON_SELECTOR)
+        await expect_async(submit).to_be_visible(timeout=10000)
+        await expect_async(submit).to_be_enabled(timeout=10000)
+        await self._check_disconnect(
+            check_client_disconnected, "After Submit Button Check"
+        )
+        self.logger.info(f"[{self.req_id}] Clicking verified Run button...")
+        # Normal Playwright hit-testing: no force, DOM click, or keyboard fallback.
+        await submit.click(timeout=5000)
+        self.logger.info(f"[{self.req_id}] Submit button clicked.")
+        await check_quota_limit(self.page, self.req_id)
+        await self._check_disconnect(check_client_disconnected, "After Submit")
 
     async def _open_upload_menu_and_choose_file(self, files_list: List[str]) -> bool:
         """Upload files via menu."""
