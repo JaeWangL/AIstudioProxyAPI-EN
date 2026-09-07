@@ -65,9 +65,43 @@ sampling policy were retained. No identity/security/anti-detection changes were 
 
 Thus the open-panel submission is **not the sole explanation**. The trial does not
 establish or exclude automation detection, session issues, or account/model access.
-A same-window, human-clicked text-only control was prepared but not submitted by
-the agent. Its result is pending; this control is not a segmentation A/B sample.
-Do not proceed to 30-image requests until permitted generation is established.
+A same-window, human-clicked text-only control was prepared. Its result and the
+subsequent input-method controls are recorded below; these are not segmentation
+A/B samples. Do not proceed to 30-image requests until proxy generation works.
+
+## Follow-up: pasted input versus typed input
+
+At 06:38–06:40 KST, inspection after the user's success report showed:
+
+- The prepared `Reply with exactly OK.` turn had an internal error.
+- Two subsequent user-entered Korean greetings received model replies; the latest
+  was a normal Korean greeting. Basic generation is therefore not universally
+  unavailable in this session, but prompt content and conversation position differed.
+- A fresh chat's settings were read back as `gemini-3.8-flash`, Low, tools off,
+  with no API key selected. The settings panel was closed before all controls.
+
+The user supplied this [copy/paste bug report](https://discuss.ai.google.dev/t/widespread-permission-denied-error-in-ai-studio-is-actually-caused-by-copy-paste-100-reproducible/179348).
+It is a forum user's reproduction report; the visible staff reply asks for details,
+not a confirmed explanation of a backend security mechanism.
+
+Three bounded native-UI controls, each in a fresh chat and using one normal Run
+click, all produced the visible permission-denied toast and internal-error turn:
+
+1. Paste the prompt prefix, then append the final period using the text-entry tool.
+2. Paste the complete prompt, press Space, then Backspace (exact original text).
+3. Paste the complete prompt, press Space and leave the trailing space, matching
+   the reported workaround. The extra space was verified before submission.
+
+These controls do not prove that native automation, Playwright filling, and physical
+typing dispatch identical events. They also do not establish account-wide denial,
+automation detection, or the root cause of this failure. The advertised workaround
+did not resolve this local reproduction, so no speculative input workaround was
+added to the controller and no segmentation prompt was changed. A physical-typing
+control with the same English prompt in a fresh chat remains needed to separate
+input method from prompt/conversation effects. Automatic generation attempts stopped.
+
+No application histories/credits, paid API fallback, billing choices, authentication,
+browser identity, security settings, or account-rotation settings were changed.
 
 ## Repeatable checks
 
