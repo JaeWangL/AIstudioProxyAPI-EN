@@ -53,13 +53,14 @@ async def smoke():
                     <ms-prompt-input-wrapper><textarea aria-label="Enter a prompt"></textarea></ms-prompt-input-wrapper>
                     <input type="file" class="file-input">
                     <ms-run-button><button class="ctrl-enter-submits ms-button-primary"
-                      aria-disabled="false" onclick="this.dataset.clicked='yes'">Run</button></ms-run-button>""")
+                      aria-disabled="false" onclick="this.dataset.clicked='yes';this.dataset.clicks=String(Number(this.dataset.clicks||0)+1)">Run</button></ms-run-button>""")
                 assert await read_rendered_model_id(page) == "gemini-3.8-flash"
                 submit = page.locator(SUBMIT_BUTTON_SELECTOR)
                 assert await submit.count() == 1
                 controller = PageController(page, logging.getLogger("smoke"), "fixture")
+                prompt = "exact fixture prompt\n한글 \\frac{1}{2} 🙂 e\u0301\t "
                 await controller.submit_prompt(
-                    "exact fixture prompt",
+                    prompt,
                     [
                         {
                             "name": "fixture.txt",
@@ -70,11 +71,9 @@ async def smoke():
                     lambda stage: False,
                 )
                 assert await submit.get_attribute("data-clicked") == "yes"
+                assert await submit.get_attribute("data-clicks") == "1"
                 assert not await page.locator("#panel").is_visible()
-                assert (
-                    await page.locator("textarea").input_value()
-                    == "exact fixture prompt"
-                )
+                assert await page.locator("textarea").input_value() == prompt
                 assert (
                     await page.locator('input[type="file"]').evaluate(
                         "el => el.files.length"

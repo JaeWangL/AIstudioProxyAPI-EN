@@ -87,6 +87,10 @@ Never silently substitute another model. Omitted thinking effort defaults to med
   submission does not accept arbitrary consent dialogs or remove application DOM.
   The main submission path uses one normal Run click only. A disabled/covered button
   or failed upload fails the request: there is no hotkey or automatic resubmit fallback.
+  The prepared prompt is read back after filling and again after attachments, just
+  before Run. A mismatch fails before submission instead of silently rewriting it.
+  This guard does not resolve the observed permission denial; physical typing and
+  automated input still differ in live controls (see COMPATIBILITY_REPORT.md).
 - Parameter caches are invalidated before each request: New chat may restore UI
   defaults without changing the selected model. Cached thinking levels are not proof.
 - An explicit internal-generation error in the model turn is reported as an upstream
@@ -121,3 +125,7 @@ Known boundaries: the upstream uses one shared browser/processing lock (serial
 inference), flattens system instructions into prompt text, and is not a full Gemini
 SDK replacement. JSON-schema/tool/PDF/response-extraction equivalence requires
 separate validation. Quota exhaustion should be surfaced or waited out, not hidden.
+Even a single user message is currently wrapped as `User:\n...\n` and stripped of
+outer whitespace by the inherited formatter. Editor readback verifies that prepared
+text, not byte-for-byte preservation of incoming message text. This boundary must
+be addressed explicitly before claiming application-pipeline transport equivalence.

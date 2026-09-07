@@ -172,6 +172,11 @@ class PageController(
         await self._check_disconnect(check_client_disconnected, "After Input Visible")
         await textarea.fill(prompt, timeout=10000)
         await self._check_disconnect(check_client_disconnected, "After Input Fill")
+        if await textarea.input_value(timeout=5000) != prompt:
+            raise RuntimeError("Prompt input readback mismatch; prompt not submitted")
+        self.logger.info(
+            f"[{self.req_id}] Prompt input readback verified ({len(prompt)} chars)."
+        )
 
         if image_list:
             self.logger.info(f"[{self.req_id}] Attaching {len(image_list)} file(s)...")
@@ -187,6 +192,9 @@ class PageController(
         await self._check_disconnect(
             check_client_disconnected, "After Submit Button Check"
         )
+        # Uploads can re-render the editor. Check again before the only Run click.
+        if await textarea.input_value(timeout=5000) != prompt:
+            raise RuntimeError("Prompt changed before Run; prompt not submitted")
         self.logger.info(f"[{self.req_id}] Clicking verified Run button...")
         # Normal Playwright hit-testing: no force, DOM click, or keyboard fallback.
         await submit.click(timeout=5000)

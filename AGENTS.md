@@ -12,6 +12,12 @@ actionability-checked Run click. Do not fall back to hotkeys, forced/DOM clicks,
 or reload-and-resubmit when that click is blocked or its result is uncertain.
 Never normalize malformed model output to turn a failed segmentation into success.
 Preserve the caller's prompt/image bytes and its existing parser/failure policy.
+Check the editor value after entry and again immediately before Run. This verifies
+the prepared UI prompt, not equivalence with the caller's messages: the inherited
+formatter adds role labels/newlines and strips outer whitespace. Report that boundary.
+Physical typing succeeded in a diagnostic control, but sequential Playwright input
+and native key entry still failed. Do not claim a copy/paste fix, append sentinel
+characters, imitate human timing, or modify browser identity/security to force success.
 An advertised/rendered model is not proof of generation permission. A permission-denied
 provider response requires human access review; do not rotate accounts, select a paid key,
 or retry indefinitely. Read COMPATIBILITY_REPORT.md before resuming live comparisons.

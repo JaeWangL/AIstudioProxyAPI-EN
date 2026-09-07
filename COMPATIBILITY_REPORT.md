@@ -103,10 +103,50 @@ input method from prompt/conversation effects. Automatic generation attempts sto
 No application histories/credits, paid API fallback, billing choices, authentication,
 browser identity, security settings, or account-rotation settings were changed.
 
+## Follow-up: physical typing succeeds, automated typing does not
+
+At 06:46 KST the user physically typed `reply with exactly OK.` into the prepared
+fresh chat and received `OK.`; both turns were verified in the UI. The initial `r`
+was lowercase, unlike the earlier prepared sentence. This strengthens the input-path
+hypothesis but does not by itself establish the underlying editor/security mechanism.
+
+A candidate replaced bulk prompt filling with Playwright's public
+[`press_sequentially`](https://playwright.dev/python/docs/api/class-locator#locator-press-sequentially),
+without inserted sentinel characters or timing/identity/security changes. Exact
+editor readback and one normal Run click were enforced. After restarting with the
+same approved proxy authentication:
+
+- A text-only HTTP request for that lowercase sentence, 3.8 Flash / Low / tools off,
+  failed with provider permission denied in **9.460 s** (06:49 KST).
+- Log inspection exposed an important comparison boundary: the upstream formatter
+  actually entered `User:\nreply with exactly OK.\n` (29 characters), not the literal
+  22-character sentence. It also strips message whitespace. The original application
+  prompt builder/parser was unchanged, but that alone does not prove wire-prompt
+  equivalence. The prior input hashes describe adapter inputs, not the final UI text.
+- To separate that formatting difference, a fresh native-UI control verified 3.8
+  Flash / Low, closed the panel, and entered the literal lowercase sentence entirely
+  through individual key presses (no paste or text-entry helper). The value was
+  verified before one normal Run click. It also returned permission denied at 06:50.
+
+Thus neither sequential Playwright typing nor native automated keys reproduced the
+physical-typing success. These are bounded diagnostics, not repeated access-denial
+retries or a proven workaround. An additional controller-only probe could not attach
+to the existing context through a second public Playwright client and stopped before
+submission; it is not counted as a generation failure.
+
+The ineffective sequential-input candidate was reverted. The final code retains
+only exact readback guards after input and immediately before Run, with mismatch,
+cancellation and single-submission tests. The real-browser fixture also covers
+multiline Korean, LaTeX, emoji, combining characters, tabs and trailing whitespace.
+No copy/paste fix or successful automated generation is claimed. Account-wide denial
+is contradicted by the physical control, but editor state, automated-input handling
+and session/provider behavior are not yet isolated. No more automatic generation
+or 30-image comparison was started, and no business DB/credit/API-key writes occurred.
+
 ## Repeatable checks
 
-Final local unit run: **2,345 passed, 9 skipped, 68 integration-marked tests excluded**
-in 65.06 s, with 59 warnings (including inherited unawaited-coroutine/deprecation
+Final readback-guard unit run: **2,353 passed, 9 skipped, 68 integration-marked tests excluded**
+in 65.43 s, with 59 warnings (including inherited unawaited-coroutine/deprecation
 warnings). Ruff and targeted Pyright checks passed. This is not full integration
 coverage; the real-browser no-Google fixture passed separately.
 
@@ -118,6 +158,6 @@ uv run python scripts/browser_runtime_smoke.py
 ```
 
 The app-side diagnostic transport and unchanged parser also passed 27 tests in
-their separate repository. Do not confuse unit/fixture success with live Google QA.
+0.73 s in their separate repository. Do not confuse unit/fixture success with live Google QA.
 Consult GETTING_STARTED.md and AGENTS.md before continuing; preserve all failure
 evidence privately and never commit auth files, customer images, or full snapshots.

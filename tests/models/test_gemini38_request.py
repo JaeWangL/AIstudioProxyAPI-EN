@@ -16,6 +16,7 @@ async def test_main_submission_never_uses_keyboard_or_retries(failure):
     page = MagicMock()
     control = page.locator.return_value
     control.fill = AsyncMock()
+    control.input_value = AsyncMock(return_value="exact input")
     control.click = AsyncMock(
         side_effect=TimeoutError("intercepted") if failure == "intercepted" else None
     )
