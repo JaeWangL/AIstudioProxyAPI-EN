@@ -18,8 +18,58 @@ import pytest
 from fastapi import HTTPException
 from playwright.async_api import Error as PlaywrightAsyncError
 
-from api_utils.page_response import locate_response_elements
+from api_utils.page_response import (
+    _wait_for_text_or_provider_error,
+    locate_response_elements,
+)
 from models.exceptions import ClientDisconnectedError
+
+
+@pytest.mark.asyncio
+async def test_provider_error_fails_without_waiting_for_markdown():
+    container = MagicMock()
+    container.get_by_text.return_value.wait_for = AsyncMock()
+    cancelled = asyncio.Event()
+
+    async def pending_response(**kwargs):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    with patch("api_utils.page_response.expect_async") as expect:
+        expect.return_value.to_be_attached = AsyncMock(side_effect=pending_response)
+        with pytest.raises(HTTPException) as error:
+            await _wait_for_text_or_provider_error(container, MagicMock(), "req1")
+    assert error.value.status_code == 502
+    assert "internal generation error" in error.value.detail
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_permission_denied_is_not_a_parser_or_generic_internal_error(
+    mock_page_response_setup,
+):
+    setup = mock_page_response_setup
+    setup["page"].get_by_text.return_value.is_visible = AsyncMock(return_value=True)
+    with (
+        patch("api_utils.page_response.expect_async") as expect,
+        patch(
+            "api_utils.page_response._wait_for_text_or_provider_error",
+            new=AsyncMock(side_effect=HTTPException(502, "internal")),
+        ),
+        patch(
+            "browser_utils.operations.save_error_snapshot", new_callable=AsyncMock
+        ) as snapshot,
+    ):
+        expect.return_value.to_be_attached = AsyncMock()
+        with pytest.raises(HTTPException) as error:
+            await locate_response_elements(
+                setup["page"], "req1", setup["logger"], setup["check_disconnect"]
+            )
+    assert error.value.status_code == 502
+    assert "denied generation permission" in error.value.detail
+    snapshot.assert_awaited_once()
 
 
 @pytest.fixture
@@ -34,6 +84,14 @@ def mock_page_response_setup():
     response_element_locator = MagicMock()
     page.locator.return_value.last = response_container_locator
     response_container_locator.locator.return_value = response_element_locator
+
+    # Keep the provider-error watch pending unless a test explicitly triggers it.
+    async def no_provider_error(**kwargs):
+        await asyncio.Future()
+
+    response_container_locator.get_by_text.return_value.wait_for = AsyncMock(
+        side_effect=no_provider_error
+    )
 
     return {
         "logger": logger,

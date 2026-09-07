@@ -174,6 +174,7 @@ async def test_switch_model_json_error_original(mock_page):
     mock_page.evaluate.side_effect = ["invalid json", None, None, None]
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(return_value="gemini-pro")
     mock_page.locator.return_value = mock_locator
 
@@ -195,6 +196,10 @@ async def test_switch_model_json_error_original(mock_page):
 @pytest.mark.asyncio
 async def test_switch_model_already_set_wrong_url(mock_page):
     """Lines 256-269: Model already set but URL wrong."""
+    mock_page.locator.return_value.first.wait_for = AsyncMock()
+    mock_page.locator.return_value.first.inner_text = AsyncMock(
+        return_value="gemini-pro"
+    )
     prefs = json.dumps({"promptModel": "models/gemini-pro"})
     mock_page.evaluate.return_value = prefs
     mock_page.url = "https://wrong.url"
@@ -220,6 +225,7 @@ async def test_switch_model_ui_state_fail_warning(mock_page):
     ]
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(return_value="new")
     mock_page.locator.return_value = mock_locator
 
@@ -252,6 +258,7 @@ async def test_switch_model_final_ui_fail(mock_page):
     ]
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(return_value="new")
     mock_page.locator.return_value = mock_locator
 
@@ -304,6 +311,7 @@ async def test_switch_model_display_read_error(mock_page):
     ]
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(side_effect=Exception("Read failed"))
     mock_page.locator.return_value = mock_locator
 
@@ -333,6 +341,7 @@ async def test_switch_model_incognito_active(mock_page):
     ]
 
     mock_model_loc = MagicMock()
+    mock_model_loc.first.wait_for = AsyncMock()
     mock_model_loc.first.inner_text = AsyncMock(return_value="new")
 
     mock_incognito = MagicMock()
@@ -374,6 +383,7 @@ async def test_switch_model_incognito_exception(mock_page):
     ]
 
     mock_model_loc = MagicMock()
+    mock_model_loc.first.wait_for = AsyncMock()
     mock_model_loc.first.inner_text = AsyncMock(return_value="new")
 
     mock_incognito = MagicMock()
@@ -547,6 +557,7 @@ async def test_set_model_display_basic(mock_page):
     state.current_ai_studio_model_id = "old"
 
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(return_value="new-model")
     mock_page.locator.return_value = mock_loc
 
@@ -566,6 +577,7 @@ async def test_set_model_display_with_storage(mock_page):
     state.model_list_fetch_event = mock_event
 
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(return_value="model-id")
     mock_page.locator.return_value = mock_loc
 
@@ -593,6 +605,7 @@ async def test_set_model_display_json_error_storage(mock_page):
     state.model_list_fetch_event = mock_event
 
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(return_value="model")
     mock_page.locator.return_value = mock_loc
 
@@ -612,6 +625,7 @@ async def test_set_model_display_json_error_storage(mock_page):
 async def test_set_model_display_exception(mock_page):
     """Lines 861-864: Exception handling."""
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(side_effect=Exception("Read failed"))
     mock_page.locator.return_value = mock_loc
 
@@ -657,6 +671,7 @@ async def test_switch_model_validation_fail_display(mock_page):
     ]
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(return_value="wrong-display")
     mock_page.locator.return_value = mock_locator
 
@@ -746,6 +761,7 @@ async def test_set_model_display_wait_for_event_timeout(mock_page):
     state.model_list_fetch_event = mock_event
 
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(return_value="model-from-page")
     mock_page.locator.return_value = mock_loc
 
@@ -765,6 +781,7 @@ async def test_set_model_display_ui_state_fail_fallback(mock_page):
     state.model_list_fetch_event = mock_event
 
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(return_value="test-model")
     mock_page.locator.return_value = mock_loc
 
@@ -789,6 +806,7 @@ async def test_set_model_display_no_model_id_found(mock_page):
     state.model_list_fetch_event = mock_event
 
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(return_value="unknown-display")
     mock_page.locator.return_value = mock_loc
 
@@ -859,6 +877,7 @@ async def test_switch_model_incognito_cancellederror(mock_page):
     ]
 
     mock_model_loc = MagicMock()
+    mock_model_loc.first.wait_for = AsyncMock()
     mock_model_loc.first.inner_text = AsyncMock(return_value="new")
 
     mock_incognito = MagicMock()
@@ -900,6 +919,7 @@ async def test_switch_model_revert_cancellederror(mock_page):
     ]
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(side_effect=asyncio.CancelledError())
     mock_page.locator.return_value = mock_locator
 
@@ -961,6 +981,7 @@ async def test_handle_initial_exception_fallback_cancellederror(mock_page):
 async def test_set_model_display_cancellederror(mock_page):
     """Lines 861-862: CancelledError in set_model_from_page_display."""
     mock_loc = MagicMock()
+    mock_loc.first.wait_for = AsyncMock()
     mock_loc.first.inner_text = AsyncMock(side_effect=asyncio.CancelledError())
     mock_page.locator.return_value = mock_loc
 
@@ -980,6 +1001,7 @@ async def test_switch_model_display_cancellederror(mock_page):
     ]
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(side_effect=asyncio.CancelledError())
     mock_page.locator.return_value = mock_locator
 

@@ -23,11 +23,13 @@ def test_parse_args_defaults():
         patch.object(sys, "argv", ["launcher"]),
     ):
         os.environ["LAUNCH_MODE"] = "test"
-        # Patch constants in launcher.config where they are used by parse_args
-        with (
-            patch("launcher.config.DEFAULT_STREAM_PORT", 3120),
-            patch("launcher.config.DEFAULT_CAMOUFOX_PORT", 9222),
-            patch("launcher.config.DEFAULT_SERVER_PORT", 2048),
+        # Other tests reload modules. Patch the globals owned by the imported
+        # function, not a potentially different sys.modules entry.
+        with patch.dict(
+            parse_args.__globals__,
+            DEFAULT_STREAM_PORT=3120,
+            DEFAULT_CAMOUFOX_PORT=9222,
+            DEFAULT_SERVER_PORT=2048,
         ):
             args = parse_args()
             assert args.server_port == 2048

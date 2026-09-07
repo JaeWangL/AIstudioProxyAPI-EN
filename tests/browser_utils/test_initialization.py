@@ -735,7 +735,7 @@ async def test_init_input_visible_timeout(
             with pytest.raises(RuntimeError):
                 await _initialize_page_logic(mock_browser)
 
-            mock_snapshot.assert_any_call("init_fail_input_timeout")
+            mock_snapshot.assert_any_call("init_fail_input")
 
 
 # 5. Cancellation & Generic Errors

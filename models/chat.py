@@ -1,8 +1,9 @@
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from config import MODEL_NAME
+from config.model_profiles import validate_model_parameters
 
 
 class FunctionCall(BaseModel):
@@ -77,6 +78,7 @@ class ChatCompletionRequest(BaseModel):
     max_output_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
     top_p: Optional[float] = None
+    top_k: Optional[int] = None
     reasoning_effort: Optional[Union[str, int]] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
@@ -87,3 +89,8 @@ class ChatCompletionRequest(BaseModel):
     # MCP per-request endpoint (optional), used for tool calling fallback to MCP service
     mcp_endpoint: Optional[str] = None
     parallel_tool_calls: Optional[bool] = True
+
+    @model_validator(mode="after")
+    def validate_provider_parameters(self):
+        validate_model_parameters(self.model, self.model_dump(exclude_none=True))
+        return self

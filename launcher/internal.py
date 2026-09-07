@@ -19,7 +19,10 @@ def run_internal_camoufox(args, launch_server, DefaultAddons):
 
     proxy_config = determine_proxy_configuration(args.internal_camoufox_proxy)
     actual_proxy_to_use = proxy_config["camoufox_proxy"]
-    print(f"--- [Internal Camoufox Start] Proxy Config: {proxy_config['source']} ---", flush=True)
+    print(
+        f"--- [Internal Camoufox Start] Proxy Config: {proxy_config['source']} ---",
+        flush=True,
+    )
 
     camoufox_proxy_internal = actual_proxy_to_use
     camoufox_os_internal = args.internal_camoufox_os
@@ -33,6 +36,7 @@ def run_internal_camoufox(args, launch_server, DefaultAddons):
     try:
         launch_args_for_internal_camoufox = {
             "port": camoufox_port_internal,
+            "host": os.environ.get("CAMOUFOX_BIND_HOST", "127.0.0.1"),
             "addons": [],
             "exclude_addons": [DefaultAddons.UBO],
             "window": (1440, 900),

@@ -18,6 +18,7 @@ Run with: python tests/test_soft_context_swapping.py
 import json
 import os
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -30,11 +31,20 @@ from browser_utils.auth_rotation import _get_next_profile, perform_auth_rotation
 from config.global_state import GlobalState
 
 
+def isolate_profile_files(testcase):
+    """Never discover or overwrite a developer's real authentication profiles."""
+    directory = tempfile.TemporaryDirectory(prefix="proxy-auth-test-")
+    testcase.addCleanup(directory.cleanup)
+    testcase.addCleanup(os.chdir, os.getcwd())
+    os.chdir(directory.name)
+
+
 class TestSoftContextSwapping(unittest.TestCase):
     """Test suite for Soft Context Swapping implementation"""
 
     def setUp(self):
         """Initialize test environment before each test"""
+        isolate_profile_files(self)
         # Reset global state
         GlobalState.reset_quota_status()
         GlobalState.init_rotation_lock()
@@ -384,6 +394,7 @@ class TestSoftContextSwappingIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up integration test environment"""
+        isolate_profile_files(self)
         # Create temporary test profile files
         self.test_cookies = [
             {

@@ -1,5 +1,11 @@
 # AI Studio Proxy API
 
+> This maintained fork includes current browser/runtime compatibility work.
+> See [GETTING_STARTED.md](GETTING_STARTED.md) for reproducible `uv` installation,
+> local-only manual-login setup, verification, and known limitations.
+> The [live compatibility report](COMPATIBILITY_REPORT.md) records unresolved Google
+> generation-permission failures. Unit tests alone do not certify live operation.
+
 This is a Python-based proxy server that converts Google AI Studio's web interface into an OpenAI-compatible API. Through Camoufox (anti-fingerprinting Firefox) and Playwright automation, it provides stable API access.
 
 This fork is the primary English version of the original project.

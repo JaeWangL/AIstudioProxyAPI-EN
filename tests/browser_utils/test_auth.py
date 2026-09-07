@@ -38,8 +38,11 @@ async def test_save_auth_state_success(mock_context, tmp_path):
 
         mock_context.storage_state.assert_called_once()
         kwargs = mock_context.storage_state.call_args[1]
-        assert kwargs["path"].endswith("test_auth.json")
         assert str(tmp_path) in kwargs["path"]
+        assert (tmp_path / "test_auth.json").is_file()
+        assert (tmp_path / "test_auth.json").stat().st_mode & 0o777 == 0o600
+        assert tmp_path.stat().st_mode & 0o777 == 0o700
+        assert not list(tmp_path.glob(".auth-*"))
 
 
 @pytest.mark.asyncio
@@ -52,8 +55,7 @@ async def test_save_auth_state_adds_json_extension(mock_context, tmp_path):
     ):
         await auth._save_auth_state(mock_context, "my_profile")
 
-        kwargs = mock_context.storage_state.call_args[1]
-        assert kwargs["path"].endswith("my_profile.json")
+        assert (tmp_path / "my_profile.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -66,9 +68,8 @@ async def test_save_auth_state_preserves_json_extension(mock_context, tmp_path):
     ):
         await auth._save_auth_state(mock_context, "already.json")
 
-        kwargs = mock_context.storage_state.call_args[1]
-        assert kwargs["path"].endswith("already.json")
-        assert not kwargs["path"].endswith("already.json.json")
+        assert (tmp_path / "already.json").is_file()
+        assert not (tmp_path / "already.json.json").exists()
 
 
 @pytest.mark.asyncio
@@ -85,6 +86,7 @@ async def test_save_auth_state_exception(mock_context, tmp_path):
         await auth._save_auth_state(mock_context, "test_auth")
 
         mock_logger.error.assert_called()
+        assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.asyncio
@@ -98,6 +100,15 @@ async def test_save_auth_state_cancelled_error(mock_context, tmp_path):
     ):
         with pytest.raises(asyncio.CancelledError):
             await auth._save_auth_state(mock_context, "test_auth")
+        assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["", ".", "..", "../escape", "/tmp/auth", "a\\b"])
+async def test_auth_filename_cannot_escape_saved_directory(mock_context, filename):
+    with pytest.raises(ValueError, match="filename"):
+        await auth._save_auth_state(mock_context, filename)
+    mock_context.storage_state.assert_not_awaited()
 
 
 # ==================== wait_for_model_list_and_handle_auth_save Tests ====================

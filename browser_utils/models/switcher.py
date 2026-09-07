@@ -11,8 +11,9 @@ from typing import Optional
 from playwright.async_api import Page as AsyncPage
 from playwright.async_api import expect as expect_async
 
-from config import AI_STUDIO_URL_PATTERN, INPUT_SELECTOR, MODEL_NAME_SELECTOR
+from config import AI_STUDIO_URL_PATTERN, INPUT_SELECTOR
 
+from .readiness import read_rendered_model_id, verify_rendered_model
 from .ui_state import _verify_and_apply_ui_state
 
 logger = logging.getLogger("AIStudioProxyServer")
@@ -56,6 +57,9 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
                 await expect_async(page.locator(INPUT_SELECTOR)).to_be_visible(
                     timeout=30000
                 )
+            # A previous failed switch may already have written localStorage.
+            # Never treat that write as evidence of the model actually selected.
+            await verify_rendered_model(page, model_id)
             return True
 
         logger.debug(
@@ -130,9 +134,8 @@ async def switch_ai_studio_model(page: AsyncPage, model_id: str, req_id: str) ->
                         break
 
             try:
-                model_name_locator = page.locator(MODEL_NAME_SELECTOR)
-                actual_displayed_model_id_on_page_raw = (
-                    await model_name_locator.first.inner_text(timeout=5000)
+                actual_displayed_model_id_on_page_raw = await read_rendered_model_id(
+                    page
                 )
                 actual_displayed_model_id_on_page = (
                     actual_displayed_model_id_on_page_raw.strip()

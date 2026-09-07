@@ -37,31 +37,14 @@ from server import app  # Import FastAPI app object from server.py
 
 # Try importing launch_server (for internal launch mode, simulating Camoufox behavior)
 try:
-    import camoufox.server
-    import camoufox.utils
     from camoufox import (
         DefaultAddons,
     )  # Assuming DefaultAddons contains AntiFingerprint
     from camoufox.server import launch_server
 
-    # --- Monkeypatch Fix Start ---
-    # Fix "proxy: expected object, got null" error in camoufox.
-    # The launch_server function fails if 'proxy' is explicitly None in the config because
-    # camoufox.utils.launch_options returns 'proxy': None, which becomes null in JSON,
-    # causing the Node.js launcher to throw "expected object, got null".
-    _original_launch_options = camoufox.utils.launch_options
+    from launcher.browser_server import configure_browser_server
 
-    def _patched_launch_options(*args, **kwargs):
-        # Call original to get the full config dict (which includes defaults like proxy=None)
-        opts = _original_launch_options(*args, **kwargs)
-        # Remove 'proxy' key if it is None, so it doesn't get sent to the JS launcher
-        if "proxy" in opts and opts["proxy"] is None:
-            del opts["proxy"]
-        return opts
-
-    # Replace the function in camoufox.server module so launch_server uses our wrapper
-    camoufox.server.launch_options = _patched_launch_options
-    # --- Monkeypatch Fix End ---
+    configure_browser_server()
 
 except ImportError:
     if "--internal-launch" in sys.argv or any(
@@ -964,6 +947,7 @@ if __name__ == "__main__":
         try:
             launch_args_for_internal_camoufox = {
                 "port": camoufox_port_internal,
+                "host": os.environ.get("CAMOUFOX_BIND_HOST", "127.0.0.1"),
                 "addons": [],
                 # "proxy": camoufox_proxy_internal, # Removed
                 "exclude_addons": [
@@ -1107,7 +1091,11 @@ if __name__ == "__main__":
 
     # --- Interactive Auth File Creation Logic ---
     # Skip this prompt if --save-auth-as is already provided (e.g., from GUI launcher)
-    if final_launch_mode == "debug" and not args.active_auth_json and not args.save_auth_as:
+    if (
+        final_launch_mode == "debug"
+        and not args.active_auth_json
+        and not args.save_auth_as
+    ):
         create_new_auth_choice = (
             input_with_timeout(
                 "  Create and save new auth file? (y/n; Default: n, 15s timeout): ", 15
@@ -1165,7 +1153,7 @@ if __name__ == "__main__":
         f"--- Step 2: Check if FastAPI server target port ({server_target_port}) is in use ---"
     )
     port_is_available = False
-    uvicorn_bind_host = "0.0.0.0"  # from dev (was 127.0.0.1 in helper)
+    uvicorn_bind_host = os.environ.get("AI_STUDIO_BIND_HOST", "0.0.0.0")
     if is_port_in_use(server_target_port, host=uvicorn_bind_host):
         logger.warning(
             f"  ❌ Port {server_target_port} (host {uvicorn_bind_host}) currently in use."
@@ -1766,7 +1754,7 @@ if __name__ == "__main__":
             # Create custom server config to control signal handling
             server_config = uvicorn.Config(
                 app,
-                host="0.0.0.0",
+                host=os.environ.get("AI_STUDIO_BIND_HOST", "0.0.0.0"),
                 port=args.server_port,
                 log_config=None,
                 access_log=False,
@@ -1853,7 +1841,10 @@ if __name__ == "__main__":
         )
 
         server_config = uvicorn.Config(
-            app, host="0.0.0.0", port=args.server_port, log_config=None
+            app,
+            host=os.environ.get("AI_STUDIO_BIND_HOST", "0.0.0.0"),
+            port=args.server_port,
+            log_config=None,
         )
         server = uvicorn.Server(server_config)
 

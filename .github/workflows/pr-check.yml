@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  POETRY_VERSION: "1.8.3"
+  POETRY_VERSION: "2.3.0"
   PYTHON_KEYRING_BACKEND: "keyring.backends.null.Keyring"
   # Playwright browser cache location (Linux)
   PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
@@ -179,7 +179,7 @@ jobs:
       - name: Get Playwright version
         id: playwright-version
         run: |
-          PLAYWRIGHT_VERSION=$(poetry run python -c "import playwright; print(playwright.__version__)" 2>/dev/null || echo "unknown")
+          PLAYWRIGHT_VERSION=$(poetry run python -c "from importlib.metadata import version; print(version('playwright'))")
           echo "version=$PLAYWRIGHT_VERSION" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers

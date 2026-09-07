@@ -35,6 +35,10 @@ from launcher.utils import (
 try:
     from camoufox import DefaultAddons
     from camoufox.server import launch_server
+
+    from launcher.browser_server import configure_browser_server
+
+    configure_browser_server()
 except Exception:
     launch_server = None
     DefaultAddons = None
@@ -235,7 +239,7 @@ class Launcher:  # pragma: no cover
         server_target_port = self.args.server_port
         logger.info(f"--- Step 2: Checking if port {server_target_port} is in use ---")
         port_is_available = False
-        uvicorn_bind_host = "0.0.0.0"
+        uvicorn_bind_host = os.environ.get("AI_STUDIO_BIND_HOST", "0.0.0.0")
         if is_port_in_use(server_target_port, host=uvicorn_bind_host):
             logger.warning(f"Port {server_target_port} is currently in use.")
             pids_on_port = find_pids_on_port(server_target_port)
@@ -446,14 +450,20 @@ class Launcher:  # pragma: no cover
         if not self.args.exit_on_auth_save:
             try:
                 uvicorn.run(
-                    app, host="0.0.0.0", port=self.args.server_port, log_config=None
+                    app,
+                    host=os.environ.get("AI_STUDIO_BIND_HOST", "0.0.0.0"),
+                    port=self.args.server_port,
+                    log_config=None,
                 )
             except Exception as e:
                 logger.critical(f"Uvicorn error: {e}", exc_info=True)
                 sys.exit(1)
         else:
             server_config = uvicorn.Config(
-                app, host="0.0.0.0", port=self.args.server_port, log_config=None
+                app,
+                host=os.environ.get("AI_STUDIO_BIND_HOST", "0.0.0.0"),
+                port=self.args.server_port,
+                log_config=None,
             )
             server = uvicorn.Server(server_config)
             stop_watcher = threading.Event()

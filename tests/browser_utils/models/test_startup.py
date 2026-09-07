@@ -40,6 +40,7 @@ class TestSetModelFromPageDisplay:
 
         # Mock the model name locator - correctly chain .first.inner_text
         first_locator = MagicMock()
+        first_locator.wait_for = AsyncMock()
         first_locator.inner_text = AsyncMock(return_value="gemini-2.0-flash")
         model_locator = MagicMock()
         model_locator.first = first_locator
@@ -60,6 +61,7 @@ class TestSetModelFromPageDisplay:
         mock_state_obj.model_list_fetch_event = None
 
         first_locator = MagicMock()
+        first_locator.wait_for = AsyncMock()
         first_locator.inner_text = AsyncMock(return_value="gemini-2.0-flash")
         model_locator = MagicMock()
         model_locator.first = first_locator
@@ -85,6 +87,7 @@ class TestSetModelFromPageDisplay:
         mock_verify_ui.return_value = True
 
         first_locator = MagicMock()
+        first_locator.wait_for = AsyncMock()
         first_locator.inner_text = AsyncMock(return_value="gemini-pro")
         model_locator = MagicMock()
         model_locator.first = first_locator
@@ -144,6 +147,7 @@ class TestHandleInitialModelStateAndStorage:
 
         # Mock the locator for model name - properly chain .first.inner_text
         first_locator = MagicMock()
+        first_locator.wait_for = AsyncMock()
         first_locator.inner_text = AsyncMock(return_value="gemini-pro")
         model_locator = MagicMock()
         model_locator.first = first_locator
@@ -180,6 +184,7 @@ class TestHandleInitialModelStateAndStorage:
         mock_page.evaluate.return_value = "invalid json {"
 
         first_locator = MagicMock()
+        first_locator.wait_for = AsyncMock()
         first_locator.inner_text = AsyncMock(return_value="gemini-pro")
         model_locator = MagicMock()
         model_locator.first = first_locator
@@ -218,6 +223,7 @@ class TestStateTaggedLogging:
         mock_page.evaluate.return_value = None  # No localStorage
 
         first_locator = MagicMock()
+        first_locator.wait_for = AsyncMock()
         first_locator.inner_text = AsyncMock(return_value="gemini-pro")
         model_locator = MagicMock()
         model_locator.first = first_locator
@@ -253,6 +259,7 @@ class TestStateTaggedLogging:
         mock_state_obj.model_list_fetch_event = None
 
         first_locator = MagicMock()
+        first_locator.wait_for = AsyncMock()
         first_locator.inner_text = AsyncMock(return_value="gemini-flash")
         model_locator = MagicMock()
         model_locator.first = first_locator

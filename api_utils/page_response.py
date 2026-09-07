@@ -2,11 +2,38 @@ import asyncio
 import logging
 from typing import Callable
 
+from fastapi import HTTPException
 from playwright.async_api import Error as PlaywrightAsyncError
 from playwright.async_api import Page as AsyncPage
 from playwright.async_api import expect as expect_async
 
 from config import RESPONSE_CONTAINER_SELECTOR, RESPONSE_TEXT_SELECTOR
+
+
+async def _wait_for_text_or_provider_error(container, element, req_id):
+    """Do not wait 90 seconds for markdown when the model turn shows an error."""
+    from .error_utils import upstream_error
+
+    text_task = asyncio.create_task(expect_async(element).to_be_attached(timeout=90000))
+    error_task = asyncio.create_task(
+        container.get_by_text("An internal error has occurred.", exact=True).wait_for(
+            state="visible", timeout=90000
+        )
+    )
+    try:
+        done, _ = await asyncio.wait(
+            {text_task, error_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if error_task in done and error_task.exception() is None:
+            raise upstream_error(
+                req_id, "AI Studio displayed an internal generation error"
+            )
+        await text_task
+    finally:
+        for task in (text_task, error_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(text_task, error_task, return_exceptions=True)
 
 
 async def locate_response_elements(
@@ -23,10 +50,31 @@ async def locate_response_elements(
     try:
         await expect_async(response_container).to_be_attached(timeout=20000)
         check_client_disconnected("After Response Container Attached: ")
-        await expect_async(response_element).to_be_attached(timeout=90000)
+        await _wait_for_text_or_provider_error(
+            response_container, response_element, req_id
+        )
         logger.info(f"[{req_id}] Response elements located.")
-    except (PlaywrightAsyncError, asyncio.TimeoutError) as locate_err:
+    except HTTPException:
+        from browser_utils.operations import save_error_snapshot
+
         from .error_utils import upstream_error
+
+        await save_error_snapshot(f"provider_generation_error_{req_id}")
+        if await page.get_by_text(
+            "Failed to generate content: permission denied. Please try again.",
+            exact=True,
+        ).is_visible():
+            raise upstream_error(
+                req_id,
+                "AI Studio denied generation permission; human account/access review required",
+            ) from None
+        raise
+    except (PlaywrightAsyncError, asyncio.TimeoutError, AssertionError) as locate_err:
+        from browser_utils.operations import save_error_snapshot
+
+        from .error_utils import upstream_error
+
+        await save_error_snapshot(f"response_location_error_{req_id}")
 
         raise upstream_error(
             req_id, f"Failed to locate AI Studio response elements: {locate_err}"

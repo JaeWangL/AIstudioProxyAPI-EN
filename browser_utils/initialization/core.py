@@ -20,10 +20,10 @@ from playwright.async_api import (
     expect as expect_async,
 )
 
+from browser_utils.models.readiness import read_rendered_model_id
 from config import (
     AI_STUDIO_URL_PATTERN,
     INPUT_SELECTOR,
-    MODEL_NAME_SELECTOR,
     USER_INPUT_END_MARKER_SERVER,
     USER_INPUT_START_MARKER_SERVER,
     GlobalState,
@@ -34,6 +34,7 @@ from config.selector_utils import (
 
 from .auth import wait_for_model_list_and_handle_auth_save
 from .debug import setup_debug_listeners
+from .diagnostics import capture_initialization_failure
 from .network import setup_network_interception_and_scripts
 
 logger = logging.getLogger("AIStudioProxyServer")
@@ -41,8 +42,10 @@ logger = logging.getLogger("AIStudioProxyServer")
 
 async def _wait_for_shutdown():
     """Helper to wait for GlobalState.IS_SHUTTING_DOWN event."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, GlobalState.IS_SHUTTING_DOWN.wait)
+    # Cancelling an executor Event.wait does not stop its underlying thread.
+    # Poll asynchronously so initialization cancellation/shutdown can finish.
+    while not GlobalState.IS_SHUTTING_DOWN.is_set():
+        await asyncio.sleep(0.1)
 
 
 async def initialize_page_logic(  # pragma: no cover
@@ -385,6 +388,7 @@ async def initialize_page_logic(  # pragma: no cover
 
         await found_page.bring_to_front()
 
+        initialization_stage = "input"
         try:
             # Use centralized selector fallback logic to find input container
             # Supports current and old UI structures (ms-prompt-input-wrapper / ms-chunk-editor / ms-prompt-box)
@@ -431,14 +435,8 @@ async def initialize_page_logic(  # pragma: no cover
                 f"[Selector] Input area located and visible ({matched_selector})"
             )
 
-            model_name_locator = found_page.locator(MODEL_NAME_SELECTOR)
-            try:
-                model_name_on_page = await model_name_locator.first.inner_text(
-                    timeout=5000
-                )
-            except PlaywrightAsyncError as e:
-                logger.error(f"Error getting model name (model_name_locator): {e}")
-                raise
+            initialization_stage = "model_settings"
+            model_name_on_page = await read_rendered_model_id(found_page)
 
             result_page_instance = found_page
             result_page_ready = True
@@ -452,13 +450,18 @@ async def initialize_page_logic(  # pragma: no cover
         except Exception as input_visible_err:
             from browser_utils.operations import save_error_snapshot
 
-            await save_error_snapshot("init_fail_input_timeout")
+            # The global page is assigned only after this function returns.
+            # Capture the actual local page before cleanup, not an unset global.
+            await capture_initialization_failure(
+                found_page, initialization_stage, input_visible_err
+            )
+            await save_error_snapshot(f"init_fail_{initialization_stage}")
             logger.error(
-                f"Page initialization failed: core input area did not become visible within expected time. Last URL was {found_page.url}",
+                f"Page initialization failed at {initialization_stage}: {input_visible_err}",
                 exc_info=True,
             )
             raise RuntimeError(
-                f"Page initialization failed: core input area did not become visible within expected time. Last URL was {found_page.url}"
+                f"Page initialization failed at {initialization_stage}: {input_visible_err}"
             ) from input_visible_err
     except asyncio.CancelledError:
         logger.warning("Page initialization cancelled.")

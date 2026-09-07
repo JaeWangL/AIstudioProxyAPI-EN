@@ -24,9 +24,12 @@ from config import (
     SUBMIT_BUTTON_SELECTOR,
     UPLOAD_BUTTON_SELECTOR,
 )
+from config.model_profiles import uses_fixed_sampling, validate_model_parameters
 from models import ClientDisconnectedError, QuotaExceededError
 
 from .initialization import enable_temporary_chat_mode
+from .models.readiness import close_run_settings_panel, verify_rendered_model
+from .models.request_contract import verify_requested_settings
 from .operations import (
     _get_final_response_content,
     _wait_for_response_completion,
@@ -79,10 +82,24 @@ class PageController(
         await self._check_disconnect(
             check_client_disconnected, "Start Parameter Adjustment"
         )
-        temp = request_params.get("temperature", DEFAULT_TEMPERATURE)
-        await self._adjust_temperature(
-            temp, page_params_cache, params_cache_lock, check_client_disconnected
-        )
+        # New-chat/reload restores UI defaults but does not reset the worker's
+        # parameter dictionary. Re-read controls on every request.
+        async with params_cache_lock:
+            page_params_cache.clear()
+        if model_id_to_use:
+            await verify_rendered_model(self.page, model_id_to_use)
+        validate_model_parameters(model_id_to_use, request_params)
+        fixed_sampling = uses_fixed_sampling(model_id_to_use)
+        if fixed_sampling:
+            request_params = dict(request_params)
+            if request_params.get("reasoning_effort") is None:
+                request_params["reasoning_effort"] = "medium"
+        else:
+            temp = request_params.get("temperature", DEFAULT_TEMPERATURE)
+            await self._adjust_temperature(
+                temp, page_params_cache, params_cache_lock, check_client_disconnected
+            )
+            await verify_requested_settings(self.page, {"temperature": temp})
         max_tokens = request_params.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
         await self._adjust_max_tokens(
             max_tokens,
@@ -96,8 +113,9 @@ class PageController(
         await self._adjust_stop_sequences(
             stop, page_params_cache, params_cache_lock, check_client_disconnected
         )
-        top_p = request_params.get("top_p", DEFAULT_TOP_P)
-        await self._adjust_top_p(top_p, check_client_disconnected)
+        if not fixed_sampling:
+            top_p = request_params.get("top_p", DEFAULT_TOP_P)
+            await self._adjust_top_p(top_p, check_client_disconnected)
         await self._ensure_tools_panel_expanded(check_client_disconnected)
 
         # Force disable URL context if function calling is active
@@ -120,6 +138,7 @@ class PageController(
         await self._adjust_google_search(
             request_params, model_id_to_use, check_client_disconnected
         )
+        await verify_requested_settings(self.page, request_params, model_id_to_use)
 
     async def clear_chat_history(self, check_client_disconnected: Callable):
         """Clear chat history and invalidate function calling cache."""
@@ -140,6 +159,7 @@ class PageController(
         self, prompt: str, image_list: List, check_client_disconnected: Callable
     ):
         """Submit prompt to the page with retries and keyboard fallbacks."""
+        await close_run_settings_panel(self.page)
         max_retries = 2
         for attempt in range(max_retries):
             try:
@@ -152,17 +172,19 @@ class PageController(
                     check_client_disconnected, "After Input Visible"
                 )
 
-                # Fill textarea using centralized logic (inherited from InputController if possible, or direct)
-                await textarea.evaluate(
-                    "(el, t) => { el.value = t; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }",
-                    prompt,
-                )
+                await textarea.fill(prompt, timeout=10000)
                 await self._check_disconnect(
                     check_client_disconnected, "After Input Fill"
                 )
 
                 if image_list:
+                    self.logger.info(
+                        f"[{self.req_id}] Attaching {len(image_list)} file(s)..."
+                    )
                     await self._open_upload_menu_and_choose_file(image_list)
+                    self.logger.info(
+                        f"[{self.req_id}] Native file selection completed."
+                    )
 
                 # Wait for submit button to be enabled
                 submit = self.page.locator(SUBMIT_BUTTON_SELECTOR)
@@ -182,12 +204,11 @@ class PageController(
 
                 if is_btn_enabled:
                     try:
-                        # Defensive workarounds before click: handle dialogs, backdrops and tooltips
-                        await self._handle_post_upload_dialog()
-                        await self._dismiss_backdrops()
-                        if hasattr(self, "_dismiss_tooltip_overlays"):
-                            await self._dismiss_tooltip_overlays()
-
+                        # Let Playwright check actionability. Do not accept arbitrary
+                        # Agree/Allow dialogs or remove application DOM before Run.
+                        self.logger.info(
+                            f"[{self.req_id}] Clicking verified Run button..."
+                        )
                         await submit.click(timeout=5000)
                         button_clicked = True
                         self.logger.info(f"[{self.req_id}] Submit button clicked.")
@@ -238,6 +259,10 @@ class PageController(
 
     async def _open_upload_menu_and_choose_file(self, files_list: List[str]) -> bool:
         """Upload files via menu."""
+        native_input = self.page.locator('input[type="file"].file-input')
+        if await native_input.count() == 1:
+            await native_input.set_input_files(files_list, timeout=15000)
+            return True
         await self.page.locator(UPLOAD_BUTTON_SELECTOR).first.click()
         btn = self.page.locator("div[role='menu'] button[role='menuitem']").filter(
             has_text="Upload File"

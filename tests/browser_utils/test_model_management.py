@@ -295,6 +295,8 @@ async def test_load_excluded_models(tmp_path):
 @pytest.mark.timeout(5)
 async def test_switch_ai_studio_model_already_set(mock_page):
     model_id = "gemini-pro"
+    mock_page.locator.return_value.first.wait_for = AsyncMock()
+    mock_page.locator.return_value.first.inner_text = AsyncMock(return_value=model_id)
     full_model_path = f"models/{model_id}"
     prefs = {"promptModel": full_model_path}
 
@@ -357,6 +359,7 @@ async def test_switch_ai_studio_model_success(mock_page):
 
         # Mock page elements
         mock_locator = MagicMock()
+        mock_locator.first.wait_for = AsyncMock()
         mock_locator.first.inner_text = AsyncMock(
             return_value=model_id
         )  # Matches target
@@ -396,6 +399,7 @@ async def test_set_model_from_page_display(mock_page):
 
     # Mock locator
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(return_value="new-model")
     mock_page.locator.return_value = mock_locator
 
@@ -487,6 +491,7 @@ async def test_switch_ai_studio_model_revert_logic(mock_page):
 
         # Simulate mismatch: page displays "Original Model" but storage has new model
         mock_locator = MagicMock()
+        mock_locator.first.wait_for = AsyncMock()
         mock_locator.first.inner_text = AsyncMock(return_value="Original Model")
         mock_page.locator.return_value = mock_locator
 
@@ -552,6 +557,7 @@ async def test_switch_ai_studio_model_incognito_toggle(mock_page):
 
         # Mock page elements
         mock_locator = MagicMock()
+        mock_locator.first.wait_for = AsyncMock()
         mock_locator.first.inner_text = AsyncMock(return_value=model_id)
 
         # Mock incognito button - INACTIVE initially
@@ -614,6 +620,10 @@ async def test_exception_handling_coverage(mock_page):
 @pytest.mark.timeout(5)
 async def test_switch_ai_studio_model_nav_only(mock_page):
     """Test navigation when model already matches but URL is wrong"""
+    mock_page.locator.return_value.first.wait_for = AsyncMock()
+    mock_page.locator.return_value.first.inner_text = AsyncMock(
+        return_value="gemini-pro"
+    )
     model_id = "gemini-pro"
     full_model_path = f"models/{model_id}"
     prefs = {"promptModel": full_model_path}
@@ -753,6 +763,7 @@ async def test_set_model_from_page_display_timeout(mock_page):
 
     # Mock locator
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(return_value="displayed-model")
     mock_page.locator.return_value = mock_locator
 
@@ -785,6 +796,7 @@ async def test_set_model_from_page_display_storage_logic(mock_page):
     mock_state.parsed_model_list = []
 
     mock_locator = MagicMock()
+    mock_locator.first.wait_for = AsyncMock()
     mock_locator.first.inner_text = AsyncMock(return_value="new-model")
     mock_page.locator.return_value = mock_locator
 
@@ -1225,6 +1237,7 @@ async def test_set_model_from_page_display_success(mock_page, mock_server):
 @pytest.mark.timeout(5)
 async def test_set_model_from_page_display_set_storage_defaults(mock_page, mock_server):
     """Test set_storage=True logic with default keys."""
+    mock_page.locator.return_value.first.wait_for = AsyncMock()
     mock_page.locator.return_value.first.inner_text = AsyncMock(
         return_value="gemini-pro"
     )
@@ -1258,6 +1271,7 @@ async def test_set_model_from_page_display_same_id(mock_page):
     mock_event.set()  # Already set
     mock_state.model_list_fetch_event = mock_event
 
+    mock_page.locator.return_value.first.wait_for = AsyncMock()
     mock_page.locator.return_value.first.inner_text = AsyncMock(
         return_value="gemini-pro"
     )
@@ -1690,6 +1704,7 @@ async def test_switch_ai_studio_model_json_error_logging(mock_page):
     ):
         mock_expect.return_value.to_be_visible = AsyncMock()
 
+        mock_page.locator.return_value.first.wait_for = AsyncMock()
         mock_page.locator.return_value.first.inner_text = AsyncMock(
             return_value="Different Model"
         )
@@ -1718,6 +1733,7 @@ async def test_switch_ai_studio_model_ui_state_fail(mock_page):
         patch("browser_utils.models.switcher.expect_async") as mock_expect,
     ):
         mock_expect.return_value.to_be_visible = AsyncMock()
+        mock_page.locator.return_value.first.wait_for = AsyncMock()
         mock_page.locator.return_value.first.inner_text = AsyncMock(
             return_value="gemini-pro"
         )
@@ -1754,6 +1770,7 @@ async def test_switch_ai_studio_model_final_storage_mismatch(mock_page):
         patch("browser_utils.models.switcher.expect_async") as mock_expect,
     ):
         mock_expect.return_value.to_be_visible = AsyncMock()
+        mock_page.locator.return_value.first.wait_for = AsyncMock()
         mock_page.locator.return_value.first.inner_text = AsyncMock(
             return_value="gemini-pro"
         )

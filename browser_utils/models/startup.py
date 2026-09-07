@@ -9,8 +9,9 @@ import logging
 from playwright.async_api import Page as AsyncPage
 from playwright.async_api import expect as expect_async
 
-from config import INPUT_SELECTOR, MODEL_NAME_SELECTOR
+from config import INPUT_SELECTOR
 
+from .readiness import read_rendered_model_id
 from .ui_state import _verify_and_apply_ui_state, _verify_ui_state_settings
 
 logger = logging.getLogger("AIStudioProxyServer")
@@ -155,10 +156,7 @@ async def _set_model_from_page_display(page: AsyncPage, set_storage: bool = Fals
 
     try:
         logger.debug("[Model] Reading current model from page display...")
-        model_name_locator = page.locator(MODEL_NAME_SELECTOR)
-        displayed_model_name_from_page_raw = await model_name_locator.first.inner_text(
-            timeout=7000
-        )
+        displayed_model_name_from_page_raw = await read_rendered_model_id(page)
         displayed_model_name = displayed_model_name_from_page_raw.strip()
         logger.debug(f"[Model] Page display: '{displayed_model_name}'")
 
