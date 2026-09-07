@@ -7,11 +7,13 @@ sampling settings, segmentation, or zero billing.
 
 ## Reproducible setup
 
-Python 3.10+ is required by Playwright 1.62; Python 3.12 is the verified local runtime.
+Python 3.10+ is required by the pinned Playwright 1.62 / Camoufox 0.5.6 packages;
+Python 3.12 is the verified local runtime. Stop the service before synchronizing
+its Python environment, or use `uv run --isolated` for a separate test environment.
 
 ```sh
 uv sync --locked --python 3.12
-uv run python -m camoufox fetch
+uv run python scripts/install_camoufox.py
 uv run python scripts/browser_runtime_smoke.py
 ```
 
@@ -19,6 +21,21 @@ The smoke check starts a real browser using the public Playwright Node API, exer
 a local collapsed-panel fixture, and stops its own process group. It does not contact
 Google, request authentication, or invoke a model. macOS was tested locally; Linux
 still needs its browser/system dependencies and a live verification on that host.
+
+The installer selects the verified official `152.0.4-beta.30` browser for the actual
+host OS/architecture and requires its published SHA-256 digest. It installs to the
+package's versioned subdirectory without deleting the legacy browser files; it also
+updates the package-manager's active-version metadata. It does not touch login
+profiles. Avoid the upstream 0.5.6 `camoufox fetch` command during migration: it can
+delete a nonempty old cache. Launchers fail early on that unmigrated state and point
+to the safe installer instead. Keep legacy files while an old process uses them.
+Additional browser copies consume disk space; this workflow does not remove them.
+
+Camoufox 0.5.6 now includes the public Playwright server implementation, so this
+fork no longer substitutes its own Node bridge. The official newline-frame / open
+stdin lifecycle is covered by a real Node regression test; waiting for EOF before
+launch would hang the updated Python server. The browser fixture prints both the
+Python package version and actual browser version to prevent confusing them.
 
 Poetry 2.3 remains supported for upstream CI. When changing runtime dependencies,
 update both dependency tables in `pyproject.toml`, regenerate `uv.lock` and
@@ -107,7 +124,8 @@ the current human-input versus automated-input discrepancy; see the audit report
 - Initialization cancellation no longer leaves blocking executor threads behind.
 - Profile-selection tests use isolated temporary directories, not the developer's
   saved authentication files; launcher-default tests no longer depend on module reload order.
-- Both launchers use a repository-owned public-API bridge for Camoufox/Playwright.
+- Both launchers use Camoufox 0.5.6's official public-API server with the shared
+  non-destructive cache guard; the obsolete repository-owned bridge was removed.
 - Current file uploads can use the actual native file input instead of translated
   menu labels. Both current and legacy stop-sequence field labels are recognized.
 - The current Run button is identified without requiring removed `type="submit"`

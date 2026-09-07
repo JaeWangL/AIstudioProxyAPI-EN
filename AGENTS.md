@@ -4,10 +4,13 @@ This is JaeWangL's maintained fork of MasuRii/AIstudioProxyAPI-EN. Start with
 GETTING_STARTED.md. Keep fixes reproducible in source control, not only in `/tmp`
 or installed packages. Use `uv sync --locked`; update both supported lockfiles when
 changing dependencies. Do not infer compatibility from version numbers alone.
-The browser engine and Python wrapper have separate versions. This branch still
-pins camoufox 0.4.11; 0.5.6 is available but its stdin protocol/cache migration must
-be checked before upgrading. Do not reuse the legacy EOF-only bridge unchanged or
-allow a new cache resolver to remove files used by the active authenticated process.
+The browser engine and Python wrapper have separate versions. This branch pins
+camoufox 0.5.6 and Playwright 1.62.0; the verified browser is 152.0.4-beta.30.
+Use `scripts/install_camoufox.py`, not the upstream fetch CLI, for a non-destructive
+side-by-side browser installation. Launch refuses an unmigrated nonempty legacy cache.
+Both launchers retain the package's official newline-framed public server script;
+do not restore the deleted EOF-only shim. Never change a running service's Python
+environment in place: use an isolated environment for compatibility experiments.
 
 Use actual DOM evidence for UI changes. Verify the rendered model and requested
 parameters before sending a prompt; localStorage/cache/HTTP 200 is insufficient.

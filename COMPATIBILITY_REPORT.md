@@ -7,8 +7,9 @@ or external helper was enabled. Provider billing was not independently audited.
 
 ## Verified locally
 
-- Python 3.12, Playwright 1.62.0, Camoufox 0.4.11 with browser 152.0.4-beta.30 on macOS.
-- Both launchers select the shared public-API bridge; a real-browser local fixture
+- Python 3.12, Playwright 1.62.0, Camoufox 0.5.6 with browser 152.0.4-beta.30 on macOS
+  in the latest isolated compatibility test. Earlier Google trials below used 0.4.11.
+- Both launchers select the shared public-API configuration; a real-browser local fixture
   covers settings opening/closing, native file selection, exact prompt filling, and Run.
 - Human Google login, owner-approved 0600 authentication save, and a subsequent
   successful restart without another login. Authentication and diagnostics are ignored
@@ -217,10 +218,40 @@ browser resolver against the active legacy cache without reviewing migration.
 No real-browser or Google-generation test on 0.5.6 was performed. The authenticated
 live service remains on 0.4.11 with its denial latch intact.
 
+## Follow-up: 0.5.6 compatibility implemented and verified locally
+
+The user's request to continue the upgrade was applied to both dependency tables
+and lockfiles. The obsolete custom Node bridge was removed in favor of 0.5.6's
+official public Playwright server. A real Node-process regression confirms that it
+launches after the newline frame while stdin is still open, then closes on EOF;
+the old bridge would hang this test. Both application launchers use the same setup.
+
+`scripts/install_camoufox.py` installs the official, SHA-256-verified browser beside
+the legacy files and refuses an unavailable/unverified asset. This avoids the
+upstream fetch CLI's destructive legacy-cache cleanup. A pre-launch guard prevents
+accidentally reaching that cleanup path. The old browser binary and owner-only
+saved login file remained present, and the existing authenticated service was left
+running on its unchanged 0.4.11 environment with generation denied/paused.
+
+An isolated 0.5.6 environment launched the real 152.0.4-beta.30 browser with
+Playwright 1.62.0 and passed the local UI fixture: model readback, opening/closing
+settings, exact multiline input, native file selection and one Run click. No login,
+Google request, customer data or model call was involved. New launcher/installer
+tests passed 10/10, and Ruff/targeted Pyright passed. The full upgraded-environment
+run passed 2,388 tests in 73.96 s (9 skipped, 68 integration tests excluded,
+60 warnings). Both lockfiles were regenerated and their consistency checks passed.
+
+This proves the upgraded software starts and handles the fixture, not that Google
+permits automated generation. The earlier actual GenerateContent 403 remains the
+last provider result. The denial latch was not cleared, and no fingerprint/security
+tuning, account rotation or paid fallback was added to get around that denial.
+The new package has changed defaults beyond launcher compatibility; a version bump
+must not be described as an isolated input-event fix or a successful live comparison.
+
 ## Repeatable checks
 
-Final access-diagnostics unit run: **2,379 passed, 9 skipped, 68 integration-marked tests excluded**
-in 65.74 s, with 59 warnings (including inherited unawaited-coroutine/deprecation
+Final 0.5.6 unit run: **2,388 passed, 9 skipped, 68 integration-marked tests excluded**
+in 73.96 s, with 60 warnings (including inherited unawaited-coroutine/deprecation
 warnings). Ruff and targeted Pyright checks passed. This is not full integration
 coverage; the real-browser no-Google fixture passed separately.
 
@@ -232,6 +263,6 @@ uv run python scripts/browser_runtime_smoke.py
 ```
 
 The app-side diagnostic transport and unchanged parser also passed 27 tests in
-0.69 s in their separate repository. Do not confuse unit/fixture success with live Google QA.
+0.74 s in their separate repository. Do not confuse unit/fixture success with live Google QA.
 Consult GETTING_STARTED.md and AGENTS.md before continuing; preserve all failure
 evidence privately and never commit auth files, customer images, or full snapshots.

@@ -83,7 +83,8 @@ async def smoke():
                 assert await read_rendered_model_id(page) == "gemini-3.8-flash"
                 print(
                     f"PASS: Playwright {importlib.metadata.version('playwright')}, "
-                    f"Camoufox {browser.version}; public server + collapsed panel fixture"
+                    f"Camoufox package {importlib.metadata.version('camoufox')}, "
+                    f"browser {browser.version}; public server + collapsed panel fixture"
                 )
             finally:
                 await browser.close()
@@ -104,11 +105,14 @@ async def smoke():
 
 if __name__ == "__main__":
     if "--child" in sys.argv:
+        from camoufox import DefaultAddons
         from camoufox.server import launch_server
 
         from launcher.browser_server import configure_browser_server
 
         configure_browser_server()
-        launch_server(headless=True, host="127.0.0.1", port=0)
+        launch_server(
+            headless=True, host="127.0.0.1", port=0, exclude_addons=list(DefaultAddons)
+        )
     else:
         asyncio.run(smoke())
